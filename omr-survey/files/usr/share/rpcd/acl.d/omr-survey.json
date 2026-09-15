@@ -1,0 +1,15 @@
+{
+	"omr-survey": {
+		"description": "Control and inspect omr-survey telemetry sessions",
+		"read": {
+			"ubus": {
+				"omr-survey": [ "status", "list" ]
+			}
+		},
+		"write": {
+			"ubus": {
+				"omr-survey": [ "start", "stop" ]
+			}
+		}
+	}
+}

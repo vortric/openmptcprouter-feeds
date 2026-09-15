@@ -1,0 +1,186 @@
+#!/bin/sh
+# /usr/libexec/rpcd/omr-survey -- ubus front-end for omr-surveyd.
+# SPDX-License-Identifier: GPL-2.0-only
+#
+#   ubus call omr-survey start  '{"session":"drive-01","duration_s":600}'
+#   ubus call omr-survey status
+#   ubus call omr-survey stop
+#   ubus call omr-survey list
+#
+# Only one session runs at a time (one procd instance). start/stop go
+# through /etc/init.d/omr-survey so procd owns the process lifetime.
+
+BASE_DIR=$(uci -q get omr-survey.settings.base_dir)
+BASE_DIR="${BASE_DIR:-/tmp/omr-survey}"
+REQUEST="${OMR_SURVEY_REQUEST:-/var/run/omr-survey.request}"
+INITD="${OMR_SURVEY_INITD:-/etc/init.d/omr-survey}"
+
+_running() {
+	ubus -S call service list '{"name":"omr-survey"}' 2>/dev/null \
+		| jsonfilter -q -e '@["omr-survey"].instances.main.running'
+}
+
+_current() {
+	[ -f "$BASE_DIR/current" ] && head -n1 "$BASE_DIR/current"
+}
+
+# Samples / bytes of a session including rotated survey.NNN.jsonl files.
+# $1 = session dir. Reads to EOF (no early-exit reader), so safe under pipefail.
+_session_samples() {
+	cat "$1"/survey*.jsonl 2>/dev/null | wc -l | tr -d ' '
+}
+
+_session_bytes() {
+	cat "$1"/survey*.jsonl 2>/dev/null | wc -c | tr -d ' '
+}
+
+_json_or_null() {
+	case "$1" in
+		\{*\}) printf '%s' "$1" ;;
+		*) printf 'null' ;;
+	esac
+}
+
+_is_uint() {
+	case "$1" in ''|*[!0-9]*) return 1 ;; esac
+	return 0
+}
+
+_valid_session() {
+	[ -n "$1" ] && [ "${#1}" -le 128 ] || return 1
+	case "$1" in
+		.|..|*[!A-Za-z0-9._-]*) return 1 ;;
+	esac
+	return 0
+}
+
+# Print one session summary object. $1 = session id.
+_session_json() {
+	local id="$1" dir meta samples bytes running cur
+	dir="$BASE_DIR/$id"
+	meta=$(cat "$dir/meta.json" 2>/dev/null)
+	samples=$(_session_samples "$dir")
+	bytes=$(_session_bytes "$dir")
+	cur=$(_current)
+	running=false
+	[ "$cur" = "$id" ] && [ "$(_running)" = "true" ] && running=true
+	printf '{"session":"%s","dir":"%s","jsonl":"%s","running":%s,"samples":%s,"bytes":%s,"meta":%s}' \
+		"$id" "$dir" "$dir/survey.jsonl" "$running" "$samples" "$bytes" "$(_json_or_null "$meta")"
+}
+
+case "$1" in
+	list)
+		cat <<'JSON'
+{
+	"start":  { "session": "str", "interval_ms": 0, "max_samples": 0, "duration_s": 0, "rotate_bytes": 0 },
+	"status": {},
+	"stop":   {},
+	"list":   {}
+}
+JSON
+		;;
+	call)
+		case "$2" in
+			start)
+				input=$(cat)
+				session=$(echo "$input" | jsonfilter -q -e '@.session')
+				interval_ms=$(echo "$input" | jsonfilter -q -e '@.interval_ms')
+				max_samples=$(echo "$input" | jsonfilter -q -e '@.max_samples')
+				duration_s=$(echo "$input" | jsonfilter -q -e '@.duration_s')
+				rotate_bytes=$(echo "$input" | jsonfilter -q -e '@.rotate_bytes')
+
+				if [ "$(_running)" = "true" ]; then
+					printf '{"ok":false,"error":"a survey is already running","session":"%s"}\n' "$(_current)"
+					exit 0
+				fi
+				if [ -n "$session" ] && ! _valid_session "$session"; then
+					echo '{"ok":false,"error":"session must match [A-Za-z0-9._-]{1,128}"}'
+					exit 0
+				fi
+				for v in "$interval_ms" "$max_samples" "$duration_s" "$rotate_bytes"; do
+					[ -z "$v" ] || _is_uint "$v" || { echo '{"ok":false,"error":"numeric parameters must be non-negative integers"}'; exit 0; }
+				done
+				if [ -z "$session" ]; then
+					rnd=$(head -c 4 /dev/urandom 2>/dev/null | hexdump -e '4/1 "%02x"' 2>/dev/null)
+					session="$(date -u +%Y%m%dT%H%M%SZ)-${rnd:-0000}"
+				fi
+				if [ -e "$BASE_DIR/$session/survey.jsonl" ]; then
+					printf '{"ok":false,"error":"session directory already has data","session":"%s"}\n' "$session"
+					exit 0
+				fi
+
+				mkdir -p "$(dirname "$REQUEST")"
+				{
+					echo "session=$session"
+					echo "interval_ms=$interval_ms"
+					echo "max_samples=$max_samples"
+					echo "duration_s=$duration_s"
+					echo "rotate_bytes=$rotate_bytes"
+				} > "$REQUEST"
+
+				"$INITD" start >/dev/null 2>&1
+
+				# Wait for the daemon to claim the session (meta.json appears).
+				i=0
+				while [ "$i" -lt 20 ] && [ ! -f "$BASE_DIR/$session/meta.json" ]; do
+					sleep 0.1 2>/dev/null || sleep 1
+					i=$((i + 1))
+				done
+				if [ -f "$BASE_DIR/$session/meta.json" ]; then
+					printf '{"ok":true,%s}\n' "$(_session_json "$session" | sed 's/^{//; s/}$//')"
+				else
+					rm -f "$REQUEST"
+					printf '{"ok":false,"error":"omr-surveyd did not start (check logread -e omr-survey)","session":"%s"}\n' "$session"
+				fi
+				;;
+			status)
+				cat >/dev/null
+				cur=$(_current)
+				running=$(_running)
+				[ "$running" = "true" ] || running=false
+				if [ -n "$cur" ]; then
+					printf '{"running":%s,"current":%s}\n' "$running" "$(_session_json "$cur")"
+				else
+					printf '{"running":%s,"current":null}\n' "$running"
+				fi
+				;;
+			stop)
+				cat >/dev/null
+				cur=$(_current)
+				if [ "$(_running)" != "true" ]; then
+					echo '{"ok":false,"error":"no survey running"}'
+					exit 0
+				fi
+				"$INITD" stop >/dev/null 2>&1
+				# procd waits for the instance; the daemon rewrites meta.json
+				# with running:false before exiting. Give it a moment anyway.
+				i=0
+				while [ "$i" -lt 30 ] && [ "$(_running)" = "true" ]; do
+					sleep 0.1 2>/dev/null || sleep 1
+					i=$((i + 1))
+				done
+				if [ -n "$cur" ]; then
+					printf '{"ok":true,%s}\n' "$(_session_json "$cur" | sed 's/^{//; s/}$//')"
+				else
+					echo '{"ok":true}'
+				fi
+				;;
+			list)
+				cat >/dev/null
+				printf '{"base_dir":"%s","sessions":[' "$BASE_DIR"
+				first=1
+				for d in "$BASE_DIR"/*/; do
+					[ -d "$d" ] || continue
+					id=$(basename "$d")
+					[ "$first" = "1" ] && first=0 || printf ','
+					_session_json "$id"
+				done
+				echo ']}'
+				;;
+			*)
+				echo '{"error": "unknown method"}'
+				exit 1
+				;;
+		esac
+		;;
+esac

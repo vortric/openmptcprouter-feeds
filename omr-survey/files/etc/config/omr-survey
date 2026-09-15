@@ -1,0 +1,11 @@
+config settings 'settings'
+	# Start a session automatically at boot / service start with no request
+	# (normal use: `ubus call omr-survey start` instead).
+	option autostart '0'
+	option base_dir '/tmp/omr-survey'
+	option interval_ms '1000'
+	# 0 = never rotate survey.jsonl (rotate with SIGHUP or set a byte size).
+	option rotate_bytes '0'
+	# 0 = unbounded; a bounded run stops itself and writes meta.json.
+	option max_samples '0'
+	option duration_s '0'

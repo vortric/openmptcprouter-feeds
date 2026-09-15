@@ -1,0 +1,70 @@
+#!/bin/sh /etc/rc.common
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# procd wrapper for omr-surveyd. Parameters come from, in priority order:
+#   1. /var/run/omr-survey.request  (written by `ubus call omr-survey start`,
+#      consumed on start)
+#   2. /etc/config/omr-survey        (defaults; autostart=0 means a bare
+#      `start` with no request does nothing)
+# Stop sends SIGTERM: the daemon finishes the sample in flight, rewrites
+# meta.json, fsyncs and closes survey.jsonl, then exits 0.
+
+# shellcheck disable=SC2034
+START=95
+STOP=10
+USE_PROCD=1
+
+REQUEST=/var/run/omr-survey.request
+PROG=/usr/sbin/omr-surveyd
+
+_gen_session() {
+	local rnd
+	rnd=$(head -c 4 /dev/urandom 2>/dev/null | hexdump -e '4/1 "%02x"' 2>/dev/null)
+	echo "$(date -u +%Y%m%dT%H%M%SZ)-${rnd:-0000}"
+}
+
+start_service() {
+	local session base_dir interval_ms rotate_bytes max_samples duration_s autostart
+
+	config_load omr-survey
+	config_get autostart settings autostart '0'
+	config_get base_dir settings base_dir '/tmp/omr-survey'
+	config_get interval_ms settings interval_ms '1000'
+	config_get rotate_bytes settings rotate_bytes '0'
+	config_get max_samples settings max_samples '0'
+	config_get duration_s settings duration_s '0'
+
+	if [ -f "$REQUEST" ]; then
+		# key=value lines, values already validated by the rpcd plugin
+		while IFS='=' read -r k v; do
+			case "$k" in
+				session) session="$v" ;;
+				interval_ms) [ -n "$v" ] && interval_ms="$v" ;;
+				max_samples) [ -n "$v" ] && max_samples="$v" ;;
+				duration_s) [ -n "$v" ] && duration_s="$v" ;;
+				rotate_bytes) [ -n "$v" ] && rotate_bytes="$v" ;;
+			esac
+		done < "$REQUEST"
+		rm -f "$REQUEST"
+	elif [ "$autostart" != "1" ]; then
+		return 0
+	fi
+
+	[ -z "$session" ] && session="$(_gen_session)"
+	mkdir -p "$base_dir"
+
+	procd_open_instance main
+	procd_set_param command "$PROG" -s "$session" -d "$base_dir" -i "$interval_ms" \
+		-n "$max_samples" -t "$duration_s" -r "$rotate_bytes"
+	# No respawn: a survey that dies must not silently restart as a new
+	# session with the same id (it would append to the same file).
+	procd_set_param respawn 0 0 0
+	procd_set_param stderr 1
+	procd_set_param term_timeout 15
+	procd_close_instance
+}
+
+# SIGHUP rotates survey.jsonl without ending the session.
+reload_service() {
+	procd_send_signal omr-survey main HUP
+}

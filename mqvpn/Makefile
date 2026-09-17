@@ -9,13 +9,13 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=mqvpn
 PKG_VERSION:=0.16.2
-PKG_RELEASE:=2
+PKG_RELEASE:=3
 PKG_LICENSE:=Apache-2.0
 PKG_LICENSE_FILES:=LICENSE
 
 PKG_SOURCE_PROTO:=git
-PKG_SOURCE_URL:=https://github.com/Ysurac/mqvpn.git
-PKG_SOURCE_VERSION:=ee78205d3db491ca7727b974bda0c91ae1523236
+PKG_SOURCE_URL:=https://github.com/vortric/mqvpn-omr.git
+PKG_SOURCE_VERSION:=a349df7e6197532960843cdb891e660c03e05af1
 PKG_MIRROR_HASH:=skip
 
 PKG_BUILD_PARALLEL:=1
@@ -73,7 +73,7 @@ define Package/mqvpn
   SUBMENU:=VPN
   TITLE:=mqvpn - QUIC-based VPN
   URL:=https://github.com/mp0rta/mqvpn
-  DEPENDS:=+kmod-tun +libevent2 +jsonfilter
+  DEPENDS:=+kmod-tun +libevent2 +libstdcpp +jsonfilter
 endef
 
 define Package/mqvpn/description

@@ -56,9 +56,9 @@ start_service() {
 	procd_open_instance main
 	procd_set_param command "$PROG" -s "$session" -d "$base_dir" -i "$interval_ms" \
 		-n "$max_samples" -t "$duration_s" -r "$rotate_bytes"
-	# No respawn: a survey that dies must not silently restart as a new
-	# session with the same id (it would append to the same file).
-	procd_set_param respawn 0 0 0
+	# Deliberately no "procd_set_param respawn": setting it with ANY values
+	# enables respawn, and a survey that exits (max_samples/duration) or
+	# dies must not be restarted into the same session file.
 	procd_set_param stderr 1
 	procd_set_param term_timeout 15
 	procd_close_instance

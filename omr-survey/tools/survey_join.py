@@ -224,6 +224,30 @@ def decode_radio(radio_state, iface, row_mono_ns=None):
         out["cell_cqi"] = _clean(sig.get("cqi"))
         out["cell_timing_advance"] = _clean(sig.get("timing_advance"))
         out["cell_level"] = sig.get("level")
+    if not reg:
+        # Modem returned no cell list this second: fall back to the phone-level
+        # SignalStrength (still the serving cell's numbers) and say so.
+        sc = None
+        for c in (line.get("signal") or {}).get("cells") or []:
+            if c.get("type") in ("CellSignalStrengthLte", "CellSignalStrengthNr"):
+                sc = c
+                break
+        if sc:
+            out["cell_source"] = "signal"
+            if sc.get("type") == "CellSignalStrengthNr":
+                out["cell_type"] = "NR"; out["cell_rsrp"] = _clean(sc.get("ss_rsrp")); out["cell_rsrq"] = _clean(sc.get("ss_rsrq")); out["cell_sinr"] = _clean(sc.get("ss_sinr"))
+            else:
+                out["cell_type"] = "LTE"; out["cell_rsrp"] = _clean(sc.get("rsrp")); out["cell_rsrq"] = _clean(sc.get("rsrq")); out["cell_sinr"] = _clean(sc.get("rssnr"))
+            out["cell_level"] = sc.get("level")
+        prev = line.get("cells_last_nonempty")
+        if isinstance(prev, dict):
+            for c in prev.get("cells") or []:
+                if c.get("registered"):
+                    ident = c.get("identity") or {}
+                    out["cell_pci_last"] = _clean(ident.get("pci")); out["cell_tac_last"] = _clean(ident.get("tac")); out["cell_last_age_ms"] = prev.get("age_ms")
+                    break
+    else:
+        out["cell_source"] = "cellinfo"
     out["neighbor_cells"] = sum(1 for c in line.get("cells") or [] if not c.get("registered"))
     pwr = line.get("power") or {}
     t = pwr.get("battery_temp_dC")

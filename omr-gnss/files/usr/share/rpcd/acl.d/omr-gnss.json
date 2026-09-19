@@ -1,0 +1,10 @@
+{
+	"omr-gnss": {
+		"description": "Read GNSS receiver state",
+		"read": {
+			"ubus": {
+				"gnss": [ "get", "status" ]
+			}
+		}
+	}
+}

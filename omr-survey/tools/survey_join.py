@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Post-process an omr-survey session off the router.
 
-For every sample row in survey.jsonl, join mqvpn's per-path transport metrics
+For every sample row in survey.jsonl, decode the GNSS fix (if the row has an
+omr-gnss `gnss` payload) and join mqvpn's per-path transport metrics
 (`mqvpn.status.clients[].paths[]`, keyed by xquic path_id) with the
 interface table (`mqvpn.paths.path_info[]`, iface <-> path_id) and, when the
 same netdev appears as `device` in the OMR metrics, with that WAN's
@@ -73,6 +74,90 @@ def flatten_omr(rec):
     }
 
 
+def _nmea_fields(sent):
+    """'$GNRMC,...*hh' -> list of fields (talker/type first), or None."""
+    if not sent or not sent.startswith("$"):
+        return None
+    body = sent[1:].split("*", 1)[0]
+    return body.split(",")
+
+
+def _dm_to_deg(v, hemi):
+    """NMEA ddmm.mmmm / dddmm.mmmm -> signed decimal degrees."""
+    if not v:
+        return None
+    try:
+        f = float(v)
+    except ValueError:
+        return None
+    deg = int(f // 100)
+    minutes = f - deg * 100
+    d = deg + minutes / 60.0
+    return -d if hemi in ("S", "W") else d
+
+
+def _num(v):
+    try:
+        return float(v) if v not in (None, "") else None
+    except ValueError:
+        return None
+
+
+def decode_gnss(g, row_mono_ns=None):
+    """Latest-fix summary from omr-gnssd's raw sentence table (survey row 'gnss').
+
+    Decodes RMC (time/date, status, speed, course), GGA (fix quality, sats,
+    HDOP, altitude), GST (1-sigma lat/lon/alt error) and VTG (km/h). Also
+    reports how old the newest RMC was when the survey row was sampled.
+    """
+    out = {"gnss_connected": None}
+    if not g:
+        return out
+    out["gnss_connected"] = g.get("connected")
+    sents = g.get("sentences") or {}
+
+    def pick(typ):
+        for talker in ("GN", "GP", "GA", "GB", "GL", "GQ"):
+            e = sents.get(talker + typ)
+            if e:
+                return e
+        return None
+
+    rmc = pick("RMC")
+    if rmc:
+        f = _nmea_fields(rmc["nmea"])
+        if f and len(f) >= 10:
+            out["gnss_rmc_status"] = f[2]
+            out["gnss_lat"] = _dm_to_deg(f[3], f[4])
+            out["gnss_lon"] = _dm_to_deg(f[5], f[6])
+            kn = _num(f[7])
+            out["gnss_speed_kmh"] = round(kn * 1.852, 3) if kn is not None else None
+            out["gnss_course_deg"] = _num(f[8])
+            t, d = f[1], f[9]
+            if len(t) >= 6 and len(d) == 6:
+                out["gnss_utc"] = f"20{d[4:6]}-{d[2:4]}-{d[0:2]}T{t[0:2]}:{t[2:4]}:{t[4:]}Z"
+            if len(f) >= 13:
+                out["gnss_rmc_mode"] = f[12]
+        if row_mono_ns is not None and rmc.get("rx_monotonic_ns"):
+            out["gnss_fix_age_ms"] = round((row_mono_ns - rmc["rx_monotonic_ns"]) / 1e6, 1)
+    gga = pick("GGA")
+    if gga:
+        f = _nmea_fields(gga["nmea"])
+        if f and len(f) >= 10:
+            out["gnss_fix_quality"] = int(f[6]) if f[6].isdigit() else None
+            out["gnss_sats"] = int(f[7]) if f[7].isdigit() else None
+            out["gnss_hdop"] = _num(f[8])
+            out["gnss_alt_m"] = _num(f[9])
+    gst = pick("GST")
+    if gst:
+        f = _nmea_fields(gst["nmea"])
+        if f and len(f) >= 9:
+            out["gnss_err_lat_m"] = _num(f[6])
+            out["gnss_err_lon_m"] = _num(f[7])
+            out["gnss_err_alt_m"] = _num(f[8])
+    return out
+
+
 def join_rows(rows, keep_raw=False):
     for lineno, row in rows:
         mq = row.get("mqvpn")
@@ -84,6 +169,7 @@ def join_rows(rows, keep_raw=False):
             "clock_monotonic_ns": row.get("clock_monotonic_ns"),
             "missed": row.get("missed"),
         }
+        base.update(decode_gnss(row.get("gnss"), row.get("clock_monotonic_ns")))
         if not mq or not (mq.get("status") or {}).get("clients"):
             yield dict(base, path_id=None, iface=None, join="no_mqvpn_status")
             continue

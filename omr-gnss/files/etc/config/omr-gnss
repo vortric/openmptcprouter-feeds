@@ -1,0 +1,8 @@
+config settings 'settings'
+	option enabled '1'
+	option bind '0.0.0.0'
+	option port '8620'
+	option state_file '/tmp/gnss/state.json'
+	# Directory for the full-rate raw NMEA log (nmea-YYYYMMDD.log, one line
+	# per sentence: <realtime_ns> <monotonic_ns> <sentence>). Empty = off.
+	option rawlog_dir '/srv/survey/gnss'

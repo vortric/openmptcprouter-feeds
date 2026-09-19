@@ -1,0 +1,44 @@
+#!/bin/sh
+# /usr/libexec/rpcd/gnss -- serve omr-gnssd's state over ubus.
+# SPDX-License-Identifier: GPL-2.0-only
+#   ubus call gnss get      -> latest sentence per type, raw, with rx stamps
+#   ubus call gnss status   -> connection / age summary
+
+STATE=$(uci -q get omr-gnss.settings.state_file)
+STATE="${STATE:-/tmp/gnss/state.json}"
+
+case "$1" in
+	list)
+		echo '{ "get": {}, "status": {} }'
+		;;
+	call)
+		case "$2" in
+			get)
+				cat >/dev/null
+				if [ -s "$STATE" ]; then cat "$STATE"; else echo '{"connected":false,"error":"no state file (omr-gnssd not running?)"}'; fi
+				;;
+			status)
+				cat >/dev/null
+				if [ -s "$STATE" ]; then
+					# Age of the newest sentence at the moment the daemon last wrote
+					# the state (both stamps come from the daemon, ns resolution),
+					# plus how old that state file itself is (second resolution).
+					wr=$(jsonfilter -i "$STATE" -e '@.clock_realtime_ns'); last=$(jsonfilter -i "$STATE" -e '@.last_rx_realtime_ns')
+					age_ms=$(( (${wr:-0} - ${last:-0}) / 1000000 )); [ "$age_ms" -lt 0 ] && age_ms=0
+					[ "${last:-0}" = "0" ] && age_ms=-1
+					state_age_s=$(( $(date +%s) - $(stat -c %Y "$STATE" 2>/dev/null || echo 0) ))
+					printf '{"running":true,"connected":%s,"peer":"%s","sentences_total":%s,"checksum_errors":%s,"last_rx_age_ms":%s,"state_age_s":%s,"types":%s}\n' \
+						"$(jsonfilter -i "$STATE" -e '@.connected')" "$(jsonfilter -i "$STATE" -e '@.peer')" \
+						"$(jsonfilter -i "$STATE" -e '@.sentences_total')" "$(jsonfilter -i "$STATE" -e '@.checksum_errors')" \
+						"$age_ms" "$state_age_s" "$(grep -oE '"[A-Z0-9-]+":\{"rx_realtime_ns"' "$STATE" | wc -l | tr -d ' ')"
+				else
+					echo '{"running":false,"connected":false}'
+				fi
+				;;
+			*)
+				echo '{"error": "unknown method"}'
+				exit 1
+				;;
+		esac
+		;;
+esac

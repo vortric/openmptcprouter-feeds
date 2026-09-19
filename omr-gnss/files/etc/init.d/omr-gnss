@@ -1,0 +1,29 @@
+#!/bin/sh /etc/rc.common
+# SPDX-License-Identifier: GPL-2.0-only
+
+# shellcheck disable=SC2034
+START=94
+STOP=11
+USE_PROCD=1
+
+start_service() {
+	local enabled bind port state_file rawlog_dir
+	config_load omr-gnss
+	config_get_bool enabled settings enabled 1
+	[ "$enabled" = "1" ] || return 0
+	config_get bind settings bind '0.0.0.0'
+	config_get port settings port '8620'
+	config_get state_file settings state_file '/tmp/gnss/state.json'
+	config_get rawlog_dir settings rawlog_dir ''
+	[ -n "$rawlog_dir" ] && mkdir -p "$rawlog_dir"
+
+	procd_open_instance main
+	procd_set_param command /usr/sbin/omr-gnssd -b "$bind" -p "$port" -s "$state_file" -r "$rawlog_dir"
+	procd_set_param respawn 3600 5 0
+	procd_set_param stderr 1
+	procd_close_instance
+}
+
+service_triggers() {
+	procd_add_reload_trigger omr-gnss
+}

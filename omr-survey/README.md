@@ -23,6 +23,10 @@ cadence does not drift) and appends one line per sample to
 * `mqvpn` bundles mqvpn's control API: `status` (`get_status`: per-path
   transport metrics keyed by xquic `path_id`) and `paths` (`list_paths`:
   `paths[]` interface names plus `path_info[]` = iface + handle + `path_id`).
+* `gnss` (when the `omr-gnss` package is installed) is omr-gnssd's raw
+  sentence table: the latest NMEA sentence per type with receive stamps.
+  Sources are configurable: `omr-survey.settings.sources` is a
+  space-separated `key=ubus_object.method` list.
 * Payloads are embedded byte-for-byte as printed by `ubus -S`. A source that
   fails or prints something that is not one JSON line is stored as `null`,
   its exit status kept in `rc`, and the raw bytes appended to `errors.log`.
@@ -68,6 +72,12 @@ tools/survey_join.py survey.jsonl --csv joined.csv
 
 `path_id` is volatile (it changes when a path is recreated or the tunnel
 reconnects), which is why the join is done per sample and never across rows.
+
+Each joined row also carries the decoded GNSS fix when present:
+`gnss_lat`, `gnss_lon`, `gnss_speed_kmh`, `gnss_course_deg`, `gnss_utc`,
+`gnss_fix_quality`, `gnss_sats`, `gnss_hdop`, `gnss_alt_m`,
+`gnss_err_lat_m` / `gnss_err_lon_m` / `gnss_err_alt_m` (from GST) and
+`gnss_fix_age_ms` (age of the newest RMC at sampling time).
 
 ## Requirements
 

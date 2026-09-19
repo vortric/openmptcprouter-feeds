@@ -24,10 +24,15 @@ _gen_session() {
 }
 
 start_service() {
-	local session base_dir interval_ms rotate_bytes max_samples duration_s autostart
+	local session base_dir interval_ms rotate_bytes max_samples duration_s autostart sources src_args
 
 	config_load omr-survey
 	config_get autostart settings autostart '0'
+	# Space-separated key=object.method list; omr-surveyd's own defaults
+	# (omr=metrics.get_all mqvpn=mqvpn.metrics) apply when empty.
+	config_get sources settings sources ''
+	src_args=""
+	for s in $sources; do src_args="$src_args -c $s"; done
 	config_get base_dir settings base_dir '/tmp/omr-survey'
 	config_get interval_ms settings interval_ms '1000'
 	config_get rotate_bytes settings rotate_bytes '0'
@@ -54,8 +59,9 @@ start_service() {
 	mkdir -p "$base_dir"
 
 	procd_open_instance main
+	# shellcheck disable=SC2086
 	procd_set_param command "$PROG" -s "$session" -d "$base_dir" -i "$interval_ms" \
-		-n "$max_samples" -t "$duration_s" -r "$rotate_bytes"
+		-n "$max_samples" -t "$duration_s" -r "$rotate_bytes" $src_args
 	# Deliberately no "procd_set_param respawn": setting it with ANY values
 	# enables respawn, and a survey that exits (max_samples/duration) or
 	# dies must not be restarted into the same session file.

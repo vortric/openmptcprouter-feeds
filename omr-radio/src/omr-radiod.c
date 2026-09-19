@@ -124,10 +124,17 @@ static void emit(const peer_t *p, const char *line, uint64_t real, uint64_t mono
 static int resolve_gateway(peer_t *p)
 {
     if (p->pinned[0]) { snprintf(p->host, sizeof(p->host), "%s", p->pinned); return 1; }
-    char cmd[512];
+    /* OMR keeps each WAN's default route in a per-interface table, so
+     * netifd reports it under inactive.route; plain route[] is the
+     * fallback, and the DHCP server address the last resort. */
+    char cmd[1024];
     snprintf(cmd, sizeof(cmd),
-             "ubus -S call network.interface dump 2>/dev/null | jsonfilter -e '@.interface[@.l3_device=\"%s\"].route[@.target=\"0.0.0.0\"].nexthop' 2>/dev/null | head -n1",
-             p->name);
+             "D=$(ubus -S call network.interface dump 2>/dev/null); "
+             "for e in '@.interface[@.l3_device=\"%s\"].inactive.route[@.target=\"0.0.0.0\"].nexthop' "
+             "'@.interface[@.l3_device=\"%s\"].route[@.target=\"0.0.0.0\"].nexthop' "
+             "'@.interface[@.l3_device=\"%s\"].data.dhcpserver'; do "
+             "g=$(echo \"$D\" | jsonfilter -e \"$e\" 2>/dev/null | head -n1); [ -n \"$g\" ] && { echo \"$g\"; break; }; done",
+             p->name, p->name, p->name);
     FILE *f = popen(cmd, "r");
     if (!f) return 0;
     char out[64] = "";

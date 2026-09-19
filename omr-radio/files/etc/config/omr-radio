@@ -1,0 +1,12 @@
+config settings 'settings'
+	option enabled '1'
+	# TCP port the omr-radio Android app listens on (on each tethered phone).
+	option port '8630'
+	# Interfaces to pull from (iface or iface=host). Empty = every
+	# network.wanN device whose multipath is master/on/backup; the phone's
+	# address is that interface's default gateway.
+	list interface ''
+	option state_file '/tmp/radio/state.json'
+	# Daily event log dir (radio-YYYYMMDD.jsonl); empty = off. While an
+	# omr-survey session runs, lines also go to <session>/radio.jsonl.
+	option rawlog_dir '/srv/survey/radio'

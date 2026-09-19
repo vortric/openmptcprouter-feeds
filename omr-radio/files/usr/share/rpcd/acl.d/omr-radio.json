@@ -1,0 +1,6 @@
+{
+	"omr-radio": {
+		"description": "Read phone radio telemetry",
+		"read": { "ubus": { "radio": [ "get", "status" ] } }
+	}
+}

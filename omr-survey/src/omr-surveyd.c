@@ -5,18 +5,25 @@
  * Once per interval (default 1 s, scheduled on CLOCK_MONOTONIC so the cadence
  * does not drift), take a CLOCK_REALTIME + CLOCK_MONOTONIC timestamp, run each
  * configured `ubus -S call <object> <method>` and append ONE line to
- * <base>/<session>/survey.jsonl:
+ * <base>/<session>/survey.jsonl (envelope format "omr-survey/2"):
  *
- *   {"seq":N,"session":"...","clock_realtime_ns":...,"clock_monotonic_ns":...,
- *    "clock_monotonic_end_ns":...,"missed":0,
- *    "omr":<raw ubus output or null>,"mqvpn":<raw ubus output or null>,
- *    "rc":{"omr":0,"mqvpn":0}}
+ *   {"seq":N,"session":"...",
+ *    "time":{"realtime_ns":...,"monotonic_ns":...,"end_monotonic_ns":...},
+ *    "missed":0,
+ *    "sources":{
+ *      "omr":  {"ok":true,"collected_at_monotonic_ns":...,"collect_ms":7.1,
+ *               "data":<raw ubus output>},
+ *      "mqvpn":{"ok":false,"collected_at_monotonic_ns":...,"collect_ms":5001.2,
+ *               "rc":1,"error":"ubus exit 1"}}}
  *
- * The ubus payloads are embedded byte-for-byte as printed by `ubus -S`
- * (compact single-line JSON): no parsing, reshaping or normalization happens
- * on the router. A payload that is empty or not a single JSON line is stored
- * as null, its exit code kept in "rc", and the raw bytes appended to
- * <session>/errors.log.
+ * The envelope carries only what the collector itself knows: sequence,
+ * session, when the sample started/ended, when each source was queried and
+ * whether the query succeeded. The ubus payloads are embedded byte-for-byte
+ * as printed by `ubus -S` (compact single-line JSON): no parsing, reshaping
+ * or normalization happens on the router. A source that fails, or returns
+ * something that is not a single JSON line, keeps its row with ok:false and
+ * the raw bytes go to <session>/errors.log, so analysis can tell "value was
+ * 0" from "not collected".
  *
  * <session>/meta.json is written at start and rewritten at stop (sample
  * count, stop reason, both clocks). SIGTERM/SIGINT finish the current sample,
@@ -227,7 +234,7 @@ static void write_meta(const char *stop_reason)
     if (gethostname(host, sizeof(host) - 1) < 0) host[0] = '\0';
     FILE *f = fopen(tmp, "w");
     if (!f) return;
-    fputs("{\"session\":", f); json_puts(f, cfg.session);
+    fputs("{\"format\":\"omr-survey/2\",\"session\":", f); json_puts(f, cfg.session);
     fputs(",\"hostname\":", f); json_puts(f, host);
     fprintf(f, ",\"pid\":%ld,\"interval_ms\":%ld,\"max_samples\":%ld,\"duration_s\":%ld,"
                "\"rotate_bytes\":%ld,\"ubus_timeout_s\":%d",
@@ -267,9 +274,13 @@ static void sample_once(void)
     char *payload[MAX_SOURCES] = {0};
     size_t plen[MAX_SOURCES] = {0};
     int rc[MAX_SOURCES] = {0};
+    uint64_t t_src[MAX_SOURCES] = {0}, t_src_end[MAX_SOURCES] = {0};
 
-    for (int i = 0; i < cfg.n_src; i++)
+    for (int i = 0; i < cfg.n_src; i++) {
+        t_src[i] = now_ns(CLOCK_MONOTONIC);
         rc[i] = run_ubus(&cfg.src[i], &payload[i], &plen[i]);
+        t_src_end[i] = now_ns(CLOCK_MONOTONIC);
+    }
     uint64_t t_mono_end = now_ns(CLOCK_MONOTONIC);
 
     /* Slots skipped because the previous sample overran the interval. */
@@ -279,21 +290,36 @@ static void sample_once(void)
 
     fprintf(g_out, "{\"seq\":%ld,\"session\":", g_seq);
     json_puts(g_out, cfg.session);
-    fprintf(g_out, ",\"clock_realtime_ns\":%llu,\"clock_monotonic_ns\":%llu,"
-                   "\"clock_monotonic_end_ns\":%llu,\"missed\":%ld",
+    fprintf(g_out, ",\"time\":{\"realtime_ns\":%llu,\"monotonic_ns\":%llu,"
+                   "\"end_monotonic_ns\":%llu},\"missed\":%ld,\"sources\":{",
             (unsigned long long)t_real, (unsigned long long)t_mono,
             (unsigned long long)t_mono_end, missed);
     for (int i = 0; i < cfg.n_src; i++) {
-        fputc(',', g_out);
+        if (i) fputc(',', g_out);
         json_puts(g_out, cfg.src[i].key);
-        fputc(':', g_out);
-        if (rc[i] == 0 && payload_ok(payload[i], plen[i])) {
+        int ok = (rc[i] == 0 && payload_ok(payload[i], plen[i]));
+        fprintf(g_out, ":{\"ok\":%s,\"collected_at_monotonic_ns\":%llu,\"collect_ms\":%.1f,",
+                ok ? "true" : "false", (unsigned long long)t_src[i],
+                (double)(t_src_end[i] - t_src[i]) / 1e6);
+        if (ok) {
+            fputs("\"data\":", g_out);
             fwrite(payload[i], 1, plen[i], g_out);
         } else {
-            fputs("null", g_out);
+            const char *why = rc[i] != 0 ? "ubus exit"
+                              : plen[i] == 0 ? "empty response"
+                              : plen[i] >= MAX_PAYLOAD ? "response truncated"
+                              : "not a single JSON line";
+            fprintf(g_out, "\"rc\":%d,\"error\":", rc[i]);
+            if (rc[i] != 0) {
+                char msg[32];
+                snprintf(msg, sizeof(msg), "ubus exit %d", rc[i]);
+                json_puts(g_out, msg);
+            } else {
+                json_puts(g_out, why);
+            }
             if (g_err) {
-                fprintf(g_err, "seq=%ld key=%s rc=%d len=%zu clock_realtime_ns=%llu\n",
-                        g_seq, cfg.src[i].key, rc[i], plen[i], (unsigned long long)t_real);
+                fprintf(g_err, "seq=%ld key=%s rc=%d len=%zu realtime_ns=%llu %s\n",
+                        g_seq, cfg.src[i].key, rc[i], plen[i], (unsigned long long)t_real, why);
                 if (payload[i] && plen[i]) {
                     fwrite(payload[i], 1, plen[i], g_err);
                     fputc('\n', g_err);
@@ -301,12 +327,7 @@ static void sample_once(void)
                 fflush(g_err);
             }
         }
-    }
-    fputs(",\"rc\":{", g_out);
-    for (int i = 0; i < cfg.n_src; i++) {
-        if (i) fputc(',', g_out);
-        json_puts(g_out, cfg.src[i].key);
-        fprintf(g_out, ":%d", rc[i]);
+        fputc('}', g_out);
     }
     fputs("}}\n", g_out);
     fflush(g_out);
@@ -354,7 +375,8 @@ static void usage(void)
     fputs("usage: omr-surveyd -s <session-id> [-d <base-dir>] [-i <interval-ms>]\n"
           "                   [-n <max-samples>] [-t <duration-s>] [-r <rotate-bytes>]\n"
           "                   [-c key=object.method ...]\n"
-          "default sources: -c omr=metrics.get_all -c mqvpn=mqvpn.metrics\n", stderr);
+          "default sources: -c omr=metrics.get_all -c mqvpn=mqvpn.metrics\n"
+          "                 -c network=network.interface.dump\n", stderr);
     exit(2);
 }
 
@@ -378,6 +400,7 @@ int main(int argc, char **argv)
     if (cfg.n_src == 0) {
         add_source("omr=metrics.get_all");
         add_source("mqvpn=mqvpn.metrics");
+        add_source("network=network.interface.dump");
     }
 
     snprintf(g_dir, sizeof(g_dir), "%s/%s", cfg.base_dir, cfg.session);

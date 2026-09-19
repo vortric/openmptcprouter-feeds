@@ -3,6 +3,7 @@ config settings 'settings'
 	option bind '0.0.0.0'
 	option port '8620'
 	option state_file '/tmp/gnss/state.json'
-	# Directory for the full-rate raw NMEA log (nmea-YYYYMMDD.log, one line
-	# per sentence: <realtime_ns> <monotonic_ns> <sentence>). Empty = off.
+	# Directory for the full-rate GNSS event log (gnss-YYYYMMDD.jsonl, one
+	# JSON line per sentence with receive stamps). Empty = off. While an
+	# omr-survey session runs, events are also written to <session>/gnss.jsonl.
 	option rawlog_dir '/srv/survey/gnss'

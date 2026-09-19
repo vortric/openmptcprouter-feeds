@@ -64,8 +64,9 @@ _session_json() {
 	cur=$(_current)
 	running=false
 	[ "$cur" = "$id" ] && [ "$(_running)" = "true" ] && running=true
-	printf '{"session":"%s","dir":"%s","jsonl":"%s","running":%s,"samples":%s,"bytes":%s,"meta":%s}' \
-		"$id" "$dir" "$dir/survey.jsonl" "$running" "$samples" "$bytes" "$(_json_or_null "$meta")"
+	gnss_events=$(cat "$dir/gnss.jsonl" 2>/dev/null | wc -l | tr -d " ")
+	printf '{"session":"%s","dir":"%s","jsonl":"%s","running":%s,"samples":%s,"bytes":%s,"gnss_events":%s,"meta":%s}' \
+		"$id" "$dir" "$dir/survey.jsonl" "$running" "$samples" "$bytes" "${gnss_events:-0}" "$(_json_or_null "$meta")"
 }
 
 case "$1" in

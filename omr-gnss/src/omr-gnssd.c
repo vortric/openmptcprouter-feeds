@@ -7,9 +7,18 @@
  * copy per key (talker+type, plus the message index for GSV and the NMEA
  * 4.1 system id for GSA) together with CLOCK_REALTIME / CLOCK_MONOTONIC
  * receive stamps, and publishes the table as JSON in a state file that the
- * rpcd plugin serves as `ubus call gnss get`. Optionally every sentence is
- * also appended verbatim, with both receive stamps, to a daily raw log so
- * the full receiver rate (5 Hz RMC etc.) survives 1 Hz survey sampling.
+ * rpcd plugin serves as `ubus call gnss get`.
+ *
+ * Every sentence is also written as ONE JSON line -- the full receiver rate
+ * (5 Hz RMC etc.) must survive the 1 Hz survey sampling:
+ *
+ *   {"seq":N,"session":"desk-02","recv_realtime_ns":...,"recv_monotonic_ns":...,
+ *    "nmea":"$GNRMC,...*3E"}
+ *
+ * to a daily file <rawlog_dir>/gnss-YYYYMMDD.jsonl (always, session may be
+ * null) and, while omr-surveyd has a session running (it publishes the id in
+ * <survey_base>/current), additionally to <survey_base>/<session>/gnss.jsonl
+ * so a session directory is self-contained.
  *
  * No NMEA field parsing beyond the key: position decoding is off-router.
  */
@@ -48,7 +57,8 @@ static struct {
     int port;
     const char *state_path;
     const char *rawlog_dir;
-} cfg = { "0.0.0.0", 8620, "/tmp/gnss/state.json", NULL };
+    const char *survey_base; /* omr-surveyd base dir, for the per-session tee */
+} cfg = { "0.0.0.0", 8620, "/tmp/gnss/state.json", NULL, NULL };
 
 static volatile sig_atomic_t g_stop = 0;
 static entry_t g_tab[MAX_KEYS];
@@ -58,6 +68,11 @@ static int g_dirty = 0;
 static char g_peer[64] = "";
 static FILE *g_raw = NULL;
 static char g_raw_day[16] = "";
+static uint64_t g_raw_seq = 0;
+static FILE *g_sess = NULL;          /* <survey_base>/<session>/gnss.jsonl */
+static char g_sess_name[136] = "";
+static uint64_t g_sess_seq = 0;
+static uint64_t g_sess_checked_mono = 0;
 
 static void on_stop(int s) { (void)s; g_stop = 1; }
 
@@ -136,25 +151,65 @@ static void store(const char *key, const char *s, size_t len, uint64_t real, uin
     g_dirty = 1;
 }
 
-static void raw_log(const char *s, size_t len, uint64_t real, uint64_t mono)
+static void emit_event(FILE *f, uint64_t seq, const char *session, const char *s,
+                       uint64_t real, uint64_t mono)
 {
-    if (!cfg.rawlog_dir) return;
-    time_t t = (time_t)(real / 1000000000ull);
-    struct tm tm;
-    gmtime_r(&t, &tm);
-    char day[16];
-    strftime(day, sizeof(day), "%Y%m%d", &tm);
-    if (!g_raw || strcmp(day, g_raw_day) != 0) {
-        if (g_raw) fclose(g_raw);
-        char path[512];
-        snprintf(path, sizeof(path), "%s/nmea-%s.log", cfg.rawlog_dir, day);
-        g_raw = fopen(path, "a");
-        snprintf(g_raw_day, sizeof(g_raw_day), "%s", day);
+    fprintf(f, "{\"seq\":%llu,\"session\":", (unsigned long long)seq);
+    if (session && *session) json_puts(f, session); else fputs("null", f);
+    fprintf(f, ",\"recv_realtime_ns\":%llu,\"recv_monotonic_ns\":%llu,\"nmea\":",
+            (unsigned long long)real, (unsigned long long)mono);
+    json_puts(f, s);
+    fputs("}\n", f);
+}
+
+/* Follow omr-surveyd's session marker (<base>/current): open/close the
+ * per-session gnss.jsonl as sessions start and stop. Checked at most once
+ * every 250 ms. */
+static void session_tee_refresh(uint64_t mono)
+{
+    if (!cfg.survey_base) return;
+    if (mono - g_sess_checked_mono < 250000000ull) return;
+    g_sess_checked_mono = mono;
+    char cur[512], name[136] = "";
+    snprintf(cur, sizeof(cur), "%s/current", cfg.survey_base);
+    FILE *f = fopen(cur, "r");
+    if (f) {
+        if (fgets(name, sizeof(name), f)) {
+            size_t n = strlen(name);
+            while (n && (name[n - 1] == '\n' || name[n - 1] == '\r' || name[n - 1] == ' ')) name[--n] = '\0';
+        }
+        fclose(f);
     }
-    if (!g_raw) return;
-    fprintf(g_raw, "%llu %llu ", (unsigned long long)real, (unsigned long long)mono);
-    fwrite(s, 1, len, g_raw);
-    fputc('\n', g_raw);
+    if (strcmp(name, g_sess_name) == 0) return;
+    if (g_sess) { fclose(g_sess); g_sess = NULL; }
+    snprintf(g_sess_name, sizeof(g_sess_name), "%s", name);
+    g_sess_seq = 0;
+    if (name[0]) {
+        char path[700];
+        snprintf(path, sizeof(path), "%s/%s/gnss.jsonl", cfg.survey_base, name);
+        g_sess = fopen(path, "a");
+    }
+}
+
+static void raw_log(const char *s, uint64_t real, uint64_t mono)
+{
+    if (cfg.rawlog_dir) {
+        time_t t = (time_t)(real / 1000000000ull);
+        struct tm tm;
+        gmtime_r(&t, &tm);
+        char day[16];
+        strftime(day, sizeof(day), "%Y%m%d", &tm);
+        if (!g_raw || strcmp(day, g_raw_day) != 0) {
+            if (g_raw) fclose(g_raw);
+            char path[512];
+            snprintf(path, sizeof(path), "%s/gnss-%s.jsonl", cfg.rawlog_dir, day);
+            g_raw = fopen(path, "a");
+            snprintf(g_raw_day, sizeof(g_raw_day), "%s", day);
+            g_raw_seq = 0;
+        }
+        if (g_raw) emit_event(g_raw, g_raw_seq++, g_sess_name, s, real, mono);
+    }
+    if (g_sess) emit_event(g_sess, g_sess_seq++, g_sess_name, s, real, mono);
 }
 
 static void write_state(int connected)
@@ -201,24 +256,26 @@ static void handle_line(char *s, size_t len)
     g_last_real = real;
     g_last_mono = mono;
     store(key, s, len, real, mono);
-    raw_log(s, len, real, mono);
+    session_tee_refresh(mono);
+    raw_log(s, real, mono);
 }
 
 static void usage(void)
 {
-    fputs("usage: omr-gnssd [-b bind] [-p port] [-s state.json] [-r rawlog-dir]\n", stderr);
+    fputs("usage: omr-gnssd [-b bind] [-p port] [-s state.json] [-r rawlog-dir] [-S survey-base-dir]\n", stderr);
     exit(2);
 }
 
 int main(int argc, char **argv)
 {
     int opt;
-    while ((opt = getopt(argc, argv, "b:p:s:r:h")) != -1) {
+    while ((opt = getopt(argc, argv, "b:p:s:r:S:h")) != -1) {
         switch (opt) {
         case 'b': cfg.bind_addr = optarg; break;
         case 'p': cfg.port = atoi(optarg); break;
         case 's': cfg.state_path = optarg; break;
         case 'r': cfg.rawlog_dir = (*optarg ? optarg : NULL); break;
+        case 'S': cfg.survey_base = (*optarg ? optarg : NULL); break;
         default: usage();
         }
     }
@@ -295,10 +352,13 @@ int main(int argc, char **argv)
         if (g_dirty && mono - g_state_written_mono >= STATE_MIN_INTERVAL_MS * 1000000ull)
             write_state(cfd >= 0);
         if (g_raw) fflush(g_raw);
+        if (g_sess) fflush(g_sess);
+        session_tee_refresh(mono);
     }
     write_state(0);
     if (cfd >= 0) close(cfd);
     close(lfd);
     if (g_raw) fclose(g_raw);
+    if (g_sess) fclose(g_sess);
     return 0;
 }

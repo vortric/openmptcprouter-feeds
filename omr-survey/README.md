@@ -7,36 +7,56 @@ survey. The router only *records*; all interpretation happens off-router.
 
 `omr-surveyd` samples once per second (scheduled on `CLOCK_MONOTONIC`, so the
 cadence does not drift) and appends one line per sample to
-`/tmp/omr-survey/<session>/survey.jsonl`:
+`/srv/survey/<session>/survey.jsonl` (envelope format `omr-survey/2`):
 
 ```json
 {"seq":12,"session":"drive-01",
- "clock_realtime_ns":1789500000123456789,"clock_monotonic_ns":81234567890,
- "clock_monotonic_end_ns":81290123456,"missed":0,
- "omr":   <raw output of `ubus -S call metrics get_all`>,
- "mqvpn": <raw output of `ubus -S call mqvpn metrics`>,
- "rc":{"omr":0,"mqvpn":0}}
+ "time":{"realtime_ns":1789500000123456789,"monotonic_ns":81234567890,
+         "end_monotonic_ns":81290123456},
+ "missed":0,
+ "sources":{
+   "omr":    {"ok":true,"collected_at_monotonic_ns":81234570000,"collect_ms":7.1,
+              "data": <raw output of `ubus -S call metrics get_all`>},
+   "mqvpn":  {"ok":true,"collected_at_monotonic_ns":81241700000,"collect_ms":5.0,
+              "data": <raw output of `ubus -S call mqvpn metrics`>},
+   "network":{"ok":true, ..., "data": <raw `ubus -S call network.interface dump`>},
+   "gnss":   {"ok":false,"collected_at_monotonic_ns":81250100000,"collect_ms":2.0,
+              "rc":1,"error":"ubus exit 1"}}}
 ```
+
+Router responsibility stops at: receive, timestamp, wrap raw, append. The
+envelope carries only what the collector itself knows (sequence, session,
+sample start/end, per-source query time, success or failure). Everything
+under `sources.*.data` is embedded byte-for-byte as printed by `ubus -S`,
+so "the value was 0" and "it was not collected" stay distinguishable and
+upstream schema changes never touch the collector.
 
 * `omr` is omr-tracker's per-WAN record set (`interfaces[]`, each with
   `interface`, `device`, latency/loss, modem signal, throughput, ...).
 * `mqvpn` bundles mqvpn's control API: `status` (`get_status`: per-path
   transport metrics keyed by xquic `path_id`) and `paths` (`list_paths`:
   `paths[]` interface names plus `path_info[]` = iface + handle + `path_id`).
-* `gnss` (when the `omr-gnss` package is installed) is omr-gnssd's raw
-  sentence table: the latest NMEA sentence per type with receive stamps.
-  Sources are configurable: `omr-survey.settings.sources` is a
-  space-separated `key=ubus_object.method` list.
-* Payloads are embedded byte-for-byte as printed by `ubus -S`. A source that
-  fails or prints something that is not one JSON line is stored as `null`,
-  its exit status kept in `rc`, and the raw bytes appended to `errors.log`.
-* `clock_monotonic_end_ns` is taken after the last ubus call, so the
-  sampling latency of each row is known. `missed` counts 1 s slots skipped
-  because the previous sample overran.
+* `network` is netifd's interface dump (up/down, addresses, l3 device).
+* `gnss` (with the `omr-gnss` package) is the latest-sentence snapshot; the
+  full-rate stream lives in `gnss.jsonl` (below).
+* Sources are configurable: `omr-survey.settings.sources` is a
+  space-separated `key=ubus_object.method` list. A failing source keeps its
+  row with `ok:false`; its raw bytes go to `errors.log`.
+* `end_monotonic_ns` is taken after the last ubus call; `missed` counts 1 s
+  slots skipped because the previous sample overran.
 
-`meta.json` in the session directory is written at start and rewritten at
-stop (`stop_reason`: `signal`, `max_samples` or `duration`; sample count;
-both clocks).
+`gnss.jsonl` in the same directory is written by omr-gnssd at the receiver's
+own rate (5 Hz RMC etc.), one JSON line per NMEA sentence:
+
+```json
+{"seq":3819,"session":"drive-01","recv_realtime_ns":1789500000123456789,
+ "recv_monotonic_ns":81234756123,"nmea":"$GNRMC,...*3E"}
+```
+
+Nothing is decoded on the router; parse, normalize, join and resample
+happen off-router (`tools/survey_join.py`). `meta.json` is written at start
+and rewritten at stop (`stop_reason`: `signal`, `max_samples` or `duration`;
+sample count; both clocks).
 
 ## Control
 

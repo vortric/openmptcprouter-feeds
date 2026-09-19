@@ -158,18 +158,38 @@ def decode_gnss(g, row_mono_ns=None):
     return out
 
 
+def unwrap(row):
+    """Return (time_realtime_ns, time_monotonic_ns, sources) for an envelope.
+
+    Format omr-survey/2: {"time":{...},"sources":{key:{"ok","data"|"error"}}}.
+    Format 1 (pre-review): payloads at top level, null on failure.
+    """
+    if "sources" in row:
+        t = row.get("time") or {}
+        src = {}
+        for k, v in row["sources"].items():
+            src[k] = v.get("data") if isinstance(v, dict) and v.get("ok") else None
+        return t.get("realtime_ns"), t.get("monotonic_ns"), src
+    src = {k: row.get(k) for k in row if k not in ("seq", "session", "missed", "rc")
+           and not k.startswith("clock_")}
+    return row.get("clock_realtime_ns"), row.get("clock_monotonic_ns"), src
+
+
 def join_rows(rows, keep_raw=False):
     for lineno, row in rows:
-        mq = row.get("mqvpn")
-        omr = row.get("omr")
+        t_real, t_mono, src = unwrap(row)
+        mq = src.get("mqvpn")
+        omr = src.get("omr")
         base = {
             "seq": row.get("seq"),
             "session": row.get("session"),
-            "clock_realtime_ns": row.get("clock_realtime_ns"),
-            "clock_monotonic_ns": row.get("clock_monotonic_ns"),
+            "clock_realtime_ns": t_real,
+            "clock_monotonic_ns": t_mono,
             "missed": row.get("missed"),
         }
-        base.update(decode_gnss(row.get("gnss"), row.get("clock_monotonic_ns")))
+        if "sources" in row:
+            base["sources_ok"] = {k: bool(v.get("ok")) for k, v in row["sources"].items()}
+        base.update(decode_gnss(src.get("gnss"), t_mono))
         if not mq or not (mq.get("status") or {}).get("clients"):
             yield dict(base, path_id=None, iface=None, join="no_mqvpn_status")
             continue

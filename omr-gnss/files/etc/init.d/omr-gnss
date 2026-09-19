@@ -16,9 +16,12 @@ start_service() {
 	config_get state_file settings state_file '/tmp/gnss/state.json'
 	config_get rawlog_dir settings rawlog_dir ''
 	[ -n "$rawlog_dir" ] && mkdir -p "$rawlog_dir"
+	# Tee GNSS events into the running omr-survey session directory.
+	local survey_base
+	survey_base=$(uci -q get omr-survey.settings.base_dir)
 
 	procd_open_instance main
-	procd_set_param command /usr/sbin/omr-gnssd -b "$bind" -p "$port" -s "$state_file" -r "$rawlog_dir"
+	procd_set_param command /usr/sbin/omr-gnssd -b "$bind" -p "$port" -s "$state_file" -r "$rawlog_dir" -S "${survey_base:-/tmp/omr-survey}"
 	procd_set_param respawn 3600 5 0
 	procd_set_param stderr 1
 	procd_close_instance

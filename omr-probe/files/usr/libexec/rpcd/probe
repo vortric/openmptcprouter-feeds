@@ -1,0 +1,44 @@
+#!/bin/sh
+# /usr/libexec/rpcd/probe -- serve omr-probed's latest values over ubus.
+# SPDX-License-Identifier: GPL-2.0-only
+#   ubus call probe get      -> per-interface latest UDP RTT/loss window and
+#                               last HTTP down/up curl results (raw)
+#   ubus call probe status   -> running + per-interface one-liners
+
+STATE=$(uci -q get omr-probe.settings.state_file)
+STATE="${STATE:-/tmp/probe/state.json}"
+
+case "$1" in
+	list)
+		echo '{ "get": {}, "status": {} }'
+		;;
+	call)
+		case "$2" in
+			get)
+				cat >/dev/null
+				if [ -s "$STATE" ]; then cat "$STATE"; else echo '{"error":"no state file (omr-probed not running?)"}'; fi
+				;;
+			status)
+				cat >/dev/null
+				if [ -s "$STATE" ]; then
+					printf '{"running":true,"state_age_s":%s,"interfaces":{' "$(( $(date +%s) - $(stat -c %Y "$STATE" 2>/dev/null || echo 0) ))"
+					first=1
+					for i in $(grep -oE '"[A-Za-z0-9_.-]+":\{"udp"' "$STATE" | cut -d'"' -f2); do
+						[ "$first" = 1 ] && first=0 || printf ','
+						printf '"%s":{"rtt_ms":%s,"loss":"%s/%s","avg_ms":%s,"jitter_ms":%s}' "$i" \
+							"$(jsonfilter -i "$STATE" -e "@.interfaces['$i'].udp.last_rtt_ms")" \
+							"$(jsonfilter -i "$STATE" -e "@.interfaces['$i'].udp.lost")" "$(jsonfilter -i "$STATE" -e "@.interfaces['$i'].udp.sent")" \
+							"$(jsonfilter -i "$STATE" -e "@.interfaces['$i'].udp.window.avg_ms")" "$(jsonfilter -i "$STATE" -e "@.interfaces['$i'].udp.window.jitter_ms")"
+					done
+					echo '}}'
+				else
+					echo '{"running":false}'
+				fi
+				;;
+			*)
+				echo '{"error": "unknown method"}'
+				exit 1
+				;;
+		esac
+		;;
+esac

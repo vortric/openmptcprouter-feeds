@@ -39,6 +39,9 @@ upstream schema changes never touch the collector.
 * `network` is netifd's interface dump (up/down, addresses, l3 device).
 * `gnss` (with the `omr-gnss` package) is the latest-sentence snapshot; the
   full-rate stream lives in `gnss.jsonl` (below).
+* `probe` (with the `omr-probe` package) is the latest active-measurement
+  state per carrier (UDP RTT window, last HTTP capacity results); every
+  individual probe result is an event in `probe.jsonl` (below).
 * Sources are configurable: `omr-survey.settings.sources` is a
   space-separated `key=ubus_object.method` list. A failing source keeps its
   row with `ok:false`; its raw bytes go to `errors.log`.
@@ -52,6 +55,11 @@ own rate (5 Hz RMC etc.), one JSON line per NMEA sentence:
 {"seq":3819,"session":"drive-01","recv_realtime_ns":1789500000123456789,
  "recv_monotonic_ns":81234756123,"nmea":"$GNRMC,...*3E"}
 ```
+
+`probe.jsonl`, likewise, holds one event per active probe result from
+omr-probed (`udp_echo` at 1 Hz per carrier, `http_down`/`http_up` per
+capacity cycle), so the per-carrier RTT/loss/capacity series are independent
+of what the tunnel scheduler chose to send.
 
 Nothing is decoded on the router; parse, normalize, join and resample
 happen off-router (`tools/survey_join.py`). `meta.json` is written at start

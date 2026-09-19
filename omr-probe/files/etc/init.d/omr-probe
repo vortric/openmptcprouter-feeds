@@ -1,0 +1,62 @@
+#!/bin/sh /etc/rc.common
+# SPDX-License-Identifier: GPL-2.0-only
+
+# shellcheck disable=SC2034
+START=95
+STOP=11
+USE_PROCD=1
+
+IFACE_ARGS=""
+
+_add_iface() { [ -n "$1" ] && IFACE_ARGS="$IFACE_ARGS -i $1"; }
+
+# Default interface set: every network.wanN whose multipath is on/master/backup.
+_wan_devices() {
+	local cfg="$1" mode dev
+	case "$cfg" in wan*) ;; *) return 0 ;; esac
+	config_get mode "$cfg" multipath ""
+	[ -z "$mode" ] && mode="$(uci -q get openmptcprouter."$cfg".multipath)"
+	case "$mode" in on|master|backup) ;; *) return 0 ;; esac
+	config_get dev "$cfg" device ""
+	_add_iface "$dev"
+}
+
+start_service() {
+	local enabled server udp_port http_base latency_ms udp_timeout_ms capacity_period_s down_bytes up_bytes capacity_max_s state_file rawlog_dir survey_base
+	config_load omr-probe
+	config_get_bool enabled settings enabled 1
+	[ "$enabled" = "1" ] || return 0
+	config_get server settings server ''
+	[ -n "$server" ] || { logger -t omr-probe "no server configured"; return 0; }
+	config_get udp_port settings udp_port '4433'
+	config_get http_base settings http_base ''
+	config_get latency_ms settings latency_ms '1000'
+	config_get udp_timeout_ms settings udp_timeout_ms '2000'
+	config_get capacity_period_s settings capacity_period_s '120'
+	config_get down_bytes settings down_bytes '5000000'
+	config_get up_bytes settings up_bytes '2000000'
+	config_get capacity_max_s settings capacity_max_s '25'
+	config_get state_file settings state_file '/tmp/probe/state.json'
+	config_get rawlog_dir settings rawlog_dir ''
+	config_list_foreach settings interface _add_iface
+	if [ -z "$IFACE_ARGS" ]; then
+		config_load network
+		config_foreach _wan_devices interface
+	fi
+	[ -n "$IFACE_ARGS" ] || { logger -t omr-probe "no interfaces to probe"; return 0; }
+	[ -n "$rawlog_dir" ] && mkdir -p "$rawlog_dir"
+	survey_base=$(uci -q get omr-survey.settings.base_dir)
+
+	procd_open_instance main
+	# shellcheck disable=SC2086
+	procd_set_param command /usr/sbin/omr-probed -H "$server" -p "$udp_port" -u "$http_base" \
+		-l "$latency_ms" -t "$udp_timeout_ms" -P "$capacity_period_s" -D "$down_bytes" -U "$up_bytes" \
+		-m "$capacity_max_s" -s "$state_file" -r "$rawlog_dir" -S "${survey_base:-/tmp/omr-survey}" $IFACE_ARGS
+	procd_set_param respawn 3600 5 0
+	procd_set_param stderr 1
+	procd_close_instance
+}
+
+service_triggers() {
+	procd_add_reload_trigger omr-probe network
+}

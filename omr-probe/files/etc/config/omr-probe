@@ -1,0 +1,23 @@
+config settings 'settings'
+	option enabled '1'
+	# omr-probe-server on the VPS (IPv4). UDP echo port and HTTP base URL.
+	option server '160.251.143.149'
+	option udp_port '4433'
+	option http_base 'http://160.251.143.149:443'
+	# Interfaces to probe. Empty = every network.wanN device whose
+	# multipath is master/on/backup.
+	list interface ''
+	# UDP echo cadence / timeout (per interface).
+	option latency_ms '1000'
+	option udp_timeout_ms '2000'
+	# Capacity probe: each interface every capacity_period_s (round-robin,
+	# one transfer at a time). down_bytes + up_bytes per interface per period:
+	# 5 MB + 2 MB every 120 s x 3 carriers = ~630 MB/h of mobile data.
+	option capacity_period_s '120'
+	option down_bytes '5000000'
+	option up_bytes '2000000'
+	option capacity_max_s '25'
+	option state_file '/tmp/probe/state.json'
+	# Daily event log dir (probe-YYYYMMDD.jsonl); empty = off. While an
+	# omr-survey session runs, events also go to <session>/probe.jsonl.
+	option rawlog_dir '/srv/survey/probe'

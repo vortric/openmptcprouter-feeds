@@ -1,0 +1,10 @@
+{
+	"omr-probe": {
+		"description": "Read active probe results",
+		"read": {
+			"ubus": {
+				"probe": [ "get", "status" ]
+			}
+		}
+	}
+}

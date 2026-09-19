@@ -11,4 +11,4 @@ config settings 'settings'
 	option duration_s '0'
 	# Sources sampled each tick as key=ubus_object.method. A source whose
 	# ubus object is absent (e.g. omr-gnss not installed) is stored as null.
-	option sources 'omr=metrics.get_all mqvpn=mqvpn.metrics network=network.interface.dump gnss=gnss.get'
+	option sources 'omr=metrics.get_all mqvpn=mqvpn.metrics network=network.interface.dump gnss=gnss.get probe=probe.get'

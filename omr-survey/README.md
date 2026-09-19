@@ -74,3 +74,20 @@ reconnects), which is why the join is done per sample and never across rows.
 * mqvpn with `list_paths` `path_info` support (control API ≥ v0.16.3) and
   the control API enabled (`mqvpn.control.control_port`).
 * `omr-metrics` (provides `ubus call metrics get_all`).
+
+## Stable WAN names for USB-tethered phones (rig example)
+
+RNDIS interfaces enumerate as `usb0`, `usb1`, ... in plug-in order and their
+MAC changes on every tethering session, so `wan1`..`wan3` would silently swap
+carriers after a reboot. `examples/hotplug-net-05-usb-tether-rename` (install
+as `/etc/hotplug.d/net/05-usb-tether-rename`, adjust the hub port paths)
+renames each interface by the USB hub port it sits on, e.g. `usb-docomo`,
+`usb-au`, `usb-softbank`, and `network.wanN.device` points at those names.
+The name then appears as `iface` in `list_paths` and as `device` in the
+omr-tracker records, so joined rows carry the carrier directly.
+
+Two rig lessons: carriers that drop ICMP need `omr-tracker.wanN.type=dns`
+(the default ping probe keeps the WAN "down" and mqvpn never adds the path),
+and never re-enumerate the phones from software (unbind/bind, `authorized`
+toggle): Android stops answering DHCP until the cable is physically
+re-plugged or tethering is toggled.

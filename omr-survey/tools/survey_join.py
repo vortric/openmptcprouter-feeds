@@ -183,7 +183,14 @@ def join_rows(rows, keep_raw=False):
                 out = dict(base)
                 out["path_id"] = pid
                 out["iface"] = iface
-                out["join"] = "ok" if iface else "path_id_not_in_list_paths"
+                if iface:
+                    out["join"] = "ok"
+                elif p.get("state_label") in ("closed", "closing"):
+                    # xquic keeps closed paths in its stats; they have no
+                    # live slot any more and carry no new traffic.
+                    out["join"] = "closed_path"
+                else:
+                    out["join"] = "path_id_not_in_list_paths"
                 out["path_status"] = info.get("status") if info else None
                 for k in ("srtt_ms", "min_rtt_ms", "cwnd", "in_flight", "bytes_tx",
                           "bytes_rx", "pkt_sent", "pkt_recv", "pkt_lost",

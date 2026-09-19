@@ -1,0 +1,82 @@
+#!/bin/sh
+# omr-survey-check -- one-screen health check of the survey rig.
+# SPDX-License-Identifier: GPL-2.0-only
+#   omr-survey-check        print once
+#   omr-survey-check -w     refresh every 2 s (Ctrl-C to stop)
+#   omr-survey-check -q     quiet: exit 0 only if everything is OK
+# Checks: services, WAN links (address / tracker / probe RTT / phone radio),
+# mqvpn paths, GNSS, active survey session and disk. Marks WARN/FAIL lines.
+
+WATCH=0; QUIET=0
+for a in "$@"; do case "$a" in -w) WATCH=1 ;; -q) QUIET=1 ;; esac; done
+BASE=$(uci -q get omr-survey.settings.base_dir); BASE="${BASE:-/tmp/omr-survey}"
+FAILS=0
+ok()   { [ "$QUIET" = 1 ] || printf '  %-28s %s\n' "$1" "$2"; }
+warn() { [ "$QUIET" = 1 ] || printf '! %-28s %s\n' "$1" "$2"; }
+fail() { FAILS=$((FAILS+1)); [ "$QUIET" = 1 ] || printf 'X %-28s %s\n' "$1" "$2"; }
+hdr()  { [ "$QUIET" = 1 ] || printf '\n== %s\n' "$1"; }
+
+check_once() {
+	FAILS=0
+	[ "$QUIET" = 1 ] || printf 'omr-survey-check  %s  uptime %ss\n' "$(date -u +%FT%TZ)" "$(cut -d. -f1 /proc/uptime)"
+
+	hdr "services"
+	for s in mqvpn omr-tracker omr-gnss omr-probe omr-radio rpcd; do
+		st=$(/etc/init.d/$s status 2>/dev/null)
+		case "$st" in running) ok "$s" running ;; *) fail "$s" "${st:-missing}" ;; esac
+	done
+
+	hdr "WAN links (device: addr | tracker | probe rtt/loss | phone radio | mqvpn)"
+	PROBE=$(ubus -S call probe get 2>/dev/null); RADIO=$(ubus -S call radio get 2>/dev/null)
+	MQ=$(ubus -S call mqvpn metrics 2>/dev/null)
+	for w in $(uci show network 2>/dev/null | sed -n 's/^network\.\(wan[0-9]*\)=interface$/\1/p'); do
+		dev=$(uci -q get "network.$w.device"); [ -n "$dev" ] || continue
+		addr=$(ip -4 -o addr show "$dev" 2>/dev/null | awk '{print $4}' | head -1)
+		trk=$(uci -q get "openmptcprouter.$w.state")
+		rtt=$(echo "$PROBE" | jsonfilter -e "@.interfaces['$dev'].udp.window.avg_ms" 2>/dev/null); sent=$(echo "$PROBE" | jsonfilter -e "@.interfaces['$dev'].udp.sent" 2>/dev/null); lost=$(echo "$PROBE" | jsonfilter -e "@.interfaces['$dev'].udp.lost" 2>/dev/null)
+		rconn=$(echo "$RADIO" | jsonfilter -e "@.interfaces['$dev'].connected" 2>/dev/null)
+		pci=$(echo "$RADIO" | jsonfilter -e "@.interfaces['$dev'].last.cells[@.registered=true].identity.pci" 2>/dev/null | head -1)
+		rsrp=$(echo "$RADIO" | jsonfilter -e "@.interfaces['$dev'].last.cells[@.registered=true].signal.rsrp" 2>/dev/null | head -1)
+		[ -z "$rsrp" ] && rsrp=$(echo "$RADIO" | jsonfilter -e "@.interfaces['$dev'].last.cells[@.registered=true].signal.ss_rsrp" 2>/dev/null | head -1)
+		mqpath=$(echo "$MQ" | jsonfilter -e "@.paths.path_info[@.iface='$dev'].live" 2>/dev/null | head -1)
+		line="$dev: ${addr:-NO-ADDR} | tracker=${trk:-?} | rtt=${rtt:-?}ms loss=${lost:-?}/${sent:-?} | radio=${rconn:-?} pci=${pci:-?} rsrp=${rsrp:-?} | mqvpn=${mqpath:-none}"
+		if [ -z "$addr" ]; then fail "$w" "$line  <- no DHCP: toggle USB tethering on the phone"
+		elif [ "$trk" != "up" ]; then warn "$w" "$line  <- tracker not up yet"
+		elif [ "$rconn" != "true" ]; then warn "$w" "$line  <- omr-radio app not connected"
+		elif [ "$mqpath" != "true" ]; then warn "$w" "$line  <- no live mqvpn path"
+		else ok "$w" "$line"; fi
+	done
+
+	hdr "mqvpn"
+	reach=$(echo "$MQ" | jsonfilter -e '@.reachable' 2>/dev/null); npaths=$(echo "$MQ" | jsonfilter -e '@.paths.path_info[*].live' 2>/dev/null | grep -c true)
+	ep=$(echo "$MQ" | jsonfilter -e '@.status.clients[0].endpoint' 2>/dev/null); csec=$(echo "$MQ" | jsonfilter -e '@.status.clients[0].connected_sec' 2>/dev/null)
+	if [ "$reach" = "true" ] && [ -n "$ep" ]; then ok "tunnel" "connected to $ep for ${csec}s, live paths=$npaths"; else fail "tunnel" "reachable=${reach:-false} endpoint=${ep:-none}"; fi
+
+	hdr "GNSS"
+	G=$(ubus -S call gnss status 2>/dev/null); GG=$(ubus -S call gnss get 2>/dev/null)
+	gc=$(echo "$G" | jsonfilter -e '@.connected' 2>/dev/null); gage=$(echo "$G" | jsonfilter -e '@.last_rx_age_ms' 2>/dev/null); gsage=$(echo "$G" | jsonfilter -e '@.state_age_s' 2>/dev/null)
+	gga=$(echo "$GG" | jsonfilter -e '@.sentences.GNGGA.nmea' 2>/dev/null); fixq=$(echo "$gga" | cut -d, -f7); sats=$(echo "$gga" | cut -d, -f8)
+	if [ "$gc" = "true" ] && [ "${gsage:-999}" -le 5 ]; then
+		if [ "${fixq:-0}" -ge 1 ] 2>/dev/null; then ok "receiver" "connected, fix quality $fixq, sats $sats, last sentence ${gage}ms ago"; else warn "receiver" "connected but no fix (quality ${fixq:-?}, sats ${sats:-?})"; fi
+	else fail "receiver" "not connected (sender must push NMEA to TCP $(uci -q get omr-gnss.settings.port))"; fi
+
+	hdr "survey"
+	SS=$(ubus -S call omr-survey status 2>/dev/null); run=$(echo "$SS" | jsonfilter -e '@.running' 2>/dev/null)
+	if [ "$run" = "true" ]; then
+		sid=$(echo "$SS" | jsonfilter -e '@.current.session'); n=$(echo "$SS" | jsonfilter -e '@.current.samples'); ge=$(echo "$SS" | jsonfilter -e '@.current.gnss_events')
+		pe=$(cat "$BASE/$sid/probe.jsonl" 2>/dev/null | wc -l | tr -d ' '); re=$(cat "$BASE/$sid/radio.jsonl" 2>/dev/null | wc -l | tr -d ' ')
+		last=$(tail -n1 "$BASE/$sid/survey.jsonl" 2>/dev/null); bad=$(echo "$last" | grep -o '"ok":false' | wc -l | tr -d ' ')
+		if [ "${bad:-0}" = "0" ]; then ok "session $sid" "samples=$n gnss=$ge probe=$pe radio=$re (last row: all sources ok)"; else warn "session $sid" "samples=$n gnss=$ge probe=$pe radio=$re (last row: $bad source(s) failed)"; fi
+	else warn "session" "none running  -> ubus call omr-survey start '{\"session\":\"NAME\"}'"; fi
+	free=$(df -m "$BASE" 2>/dev/null | awk 'NR==2{print $4}')
+	if [ "${free:-0}" -gt 2000 ]; then ok "disk $BASE" "${free} MB free"; else fail "disk $BASE" "${free:-?} MB free"; fi
+
+	[ "$QUIET" = 1 ] || { printf '\n'; [ "$FAILS" = 0 ] && echo "RESULT: OK" || echo "RESULT: $FAILS problem(s)"; }
+}
+
+if [ "$WATCH" = 1 ]; then
+	while true; do out=$(check_once); clear; printf '%s\n' "$out"; sleep 2; done
+else
+	check_once
+	[ "$FAILS" = 0 ]
+fi

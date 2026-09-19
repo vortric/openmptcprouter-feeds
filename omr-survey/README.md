@@ -85,6 +85,14 @@ session.
 Defaults live in `/etc/config/omr-survey`; `autostart '1'` starts a session
 at boot without a request.
 
+## Health check on the router
+
+`omr-survey-check` prints one screen with services, each WAN link (address,
+omr-tracker state, probe RTT/loss, phone radio connection, PCI/RSRP, live
+mqvpn path), the tunnel, the GNSS receiver, the running session and disk;
+lines are marked `!` (warning) or `X` (problem) with the fix to apply.
+`omr-survey-check -w` refreshes every 2 s, `-q` only sets the exit code.
+
 ## Post-processing (off-router)
 
 `tools/survey_join.py` (Python 3, not installed on the router) joins, per

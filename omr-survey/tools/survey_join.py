@@ -175,6 +175,64 @@ def unwrap(row):
     return row.get("clock_realtime_ns"), row.get("clock_monotonic_ns"), src
 
 
+UNAVAILABLE = 2147483647  # Android CellInfo sentinel
+
+
+def _clean(v):
+    return None if v in (None, UNAVAILABLE, -UNAVAILABLE - 1) else v
+
+
+def decode_radio(radio_state, iface, row_mono_ns=None):
+    """Registered-cell summary for `iface` from omr-radiod's state (survey row
+    'radio' source). Keeps the Android values; only the sentinel becomes None."""
+    out = {}
+    if not radio_state:
+        return out
+    ent = (radio_state.get("interfaces") or {}).get(iface)
+    if not ent:
+        return out
+    out["radio_connected"] = ent.get("connected")
+    line = ent.get("last")
+    if not line:
+        return out
+    if row_mono_ns is not None and ent.get("last_recv_monotonic_ns"):
+        out["radio_age_ms"] = round((row_mono_ns - ent["last_recv_monotonic_ns"]) / 1e6, 1)
+    svc = line.get("service") or {}
+    out["radio_data_network"] = svc.get("data_network_type_name")
+    disp = line.get("display") or {}
+    if isinstance(disp, dict):
+        out["radio_override_type"] = disp.get("override_network_type_name")
+    reg = None
+    for c in line.get("cells") or []:
+        if c.get("registered"):
+            reg = c
+            break
+    if reg:
+        ident, sig = reg.get("identity") or {}, reg.get("signal") or {}
+        out["cell_type"] = reg.get("type")
+        out["cell_pci"] = _clean(ident.get("pci"))
+        out["cell_tac"] = _clean(ident.get("tac"))
+        out["cell_id"] = _clean(ident.get("ci") if reg.get("type") == "LTE" else ident.get("nci"))
+        out["cell_arfcn"] = _clean(ident.get("earfcn") if reg.get("type") == "LTE" else ident.get("nrarfcn"))
+        out["cell_bands"] = ident.get("bands")
+        out["cell_bandwidth_khz"] = _clean(ident.get("bandwidth_khz"))
+        if reg.get("type") == "NR":
+            out["cell_rsrp"] = _clean(sig.get("ss_rsrp")); out["cell_rsrq"] = _clean(sig.get("ss_rsrq")); out["cell_sinr"] = _clean(sig.get("ss_sinr"))
+        else:
+            out["cell_rsrp"] = _clean(sig.get("rsrp")); out["cell_rsrq"] = _clean(sig.get("rsrq")); out["cell_sinr"] = _clean(sig.get("rssnr"))
+        out["cell_rssi"] = _clean(sig.get("rssi"))
+        out["cell_cqi"] = _clean(sig.get("cqi"))
+        out["cell_timing_advance"] = _clean(sig.get("timing_advance"))
+        out["cell_level"] = sig.get("level")
+    out["neighbor_cells"] = sum(1 for c in line.get("cells") or [] if not c.get("registered"))
+    pwr = line.get("power") or {}
+    t = pwr.get("battery_temp_dC")
+    out["phone_battery_temp_c"] = (t / 10.0) if isinstance(t, int) and t != -2147483648 else None
+    out["phone_thermal_status"] = pwr.get("thermal_status")
+    out["phone_battery_pct"] = pwr.get("battery_pct")
+    return out
+
+
 def join_rows(rows, keep_raw=False):
     for lineno, row in rows:
         t_real, t_mono, src = unwrap(row)
@@ -217,6 +275,8 @@ def join_rows(rows, keep_raw=False):
                           "state_label", "reinject_tx_bytes"):
                     out["mq_" + k] = p.get(k)
                 out.update(flatten_omr(devices.get(iface)))
+                if iface:
+                    out.update(decode_radio(src.get("radio"), iface, t_mono))
                 if keep_raw:
                     out["mq_path_raw"] = p
                     out["omr_raw"] = devices.get(iface)

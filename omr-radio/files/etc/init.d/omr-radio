@@ -41,6 +41,7 @@ start_service() {
 	# shellcheck disable=SC2086
 	procd_set_param command /usr/sbin/omr-radiod -p "$port" -s "$state_file" -r "$rawlog_dir" -S "${survey_base:-/tmp/omr-survey}" $IFACE_ARGS
 	procd_set_param respawn 3600 5 0
+	# exits by itself after 60 s without any peer (self-heal), so respawn must stay on
 	procd_set_param stderr 1
 	procd_close_instance
 }

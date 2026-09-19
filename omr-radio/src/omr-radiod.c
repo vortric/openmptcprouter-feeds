@@ -129,7 +129,7 @@ static int resolve_gateway(peer_t *p)
      * fallback, and the DHCP server address the last resort. */
     char cmd[1024];
     snprintf(cmd, sizeof(cmd),
-             "D=$(ubus -S call network.interface dump 2>/dev/null); "
+             "D=$(timeout 5 ubus -S call network.interface dump 2>/dev/null); "
              "for e in '@.interface[@.l3_device=\"%s\"].inactive.route[@.target=\"0.0.0.0\"].nexthop' "
              "'@.interface[@.l3_device=\"%s\"].route[@.target=\"0.0.0.0\"].nexthop' "
              "'@.interface[@.l3_device=\"%s\"].data.dhcpserver'; do "
@@ -274,9 +274,19 @@ int main(int argc, char **argv)
             peer_t *p = &cfg.p[i];
             if (p->st == ST_IDLE && mono >= p->next_try_mono) peer_try_connect(p, mono);
             else if (p->st == ST_CONNECTING && mono - p->connect_started_mono > 5000000000ull) peer_close(p, mono, "connect timeout");
-            else if (p->st == ST_CONNECTED && p->last_mono && mono - p->last_mono > 15000000000ull) peer_close(p, mono, "no data for 15s");
+            else if (p->st == ST_CONNECTED && mono - (p->last_mono ? p->last_mono : p->connected_since_mono) > 15000000000ull) peer_close(p, mono, "no data for 15s");
         }
         if (mono - last_state >= 1000000000ull) { write_state(); last_state = mono; }
+        /* Last-resort self-heal: if nothing has been connected for 60 s
+         * although interfaces exist, exit and let procd respawn us. */
+        {
+            static uint64_t all_down_since = 0;
+            int any = 0, any_if = 0;
+            for (int i = 0; i < cfg.n; i++) { if (cfg.p[i].st == ST_CONNECTED) any = 1; if (if_nametoindex(cfg.p[i].name)) any_if = 1; }
+            if (any || !any_if) all_down_since = 0;
+            else if (!all_down_since) all_down_since = mono;
+            else if (mono - all_down_since > 60000000000ull) { fputs("omr-radiod: no peer for 60s, exiting for respawn\n", stderr); g_stop = 1; }
+        }
     }
     for (int i = 0; i < cfg.n; i++) if (cfg.p[i].fd >= 0) close(cfg.p[i].fd);
     write_state();

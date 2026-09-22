@@ -11,17 +11,24 @@ config settings 'settings'
 	# tunnel actually delivers (RTT 1 Hz + capacity per period, same as a
 	# carrier) and is the only thing that puts real traffic on mqvpn's
 	# paths, without which its per-path metrics stay idle. Empty = off.
-	option tunnel_interface 'tun0'
+	# Empty = use mqvpn.interface.tun_name (keeps one source of truth).
+	option tunnel_interface ''
 	# UDP echo cadence / timeout (per interface).
 	option latency_ms '1000'
 	option udp_timeout_ms '2000'
 	# Capacity probe: each interface every capacity_period_s (round-robin,
 	# one transfer at a time). down_bytes + up_bytes per interface per period:
-	# 5 MB + 2 MB every 120 s x 3 carriers = ~630 MB/h of mobile data.
+	# 5 MB + 2 MB every 120 s x (3 carriers + the tunnel) = ~840 MB/h of
+	# mobile data; the tunnel's share rides on the three carriers.
 	option capacity_period_s '120'
 	option down_bytes '5000000'
 	option up_bytes '2000000'
-	option capacity_max_s '25'
+	# Per transfer. A down+up pair must fit inside one round-robin slot
+	# (capacity_period_s / number of targets = 30 s with 4 targets), or a slow
+	# carrier pushes every other target's measurement later. A timed-out
+	# transfer still reports a valid rate for what it did move (curl exit 28
+	# with http_code 200), so capping this costs bytes, not measurements.
+	option capacity_max_s '14'
 	option state_file '/tmp/probe/state.json'
 	# Daily event log dir (probe-YYYYMMDD.jsonl); empty = off. While an
 	# omr-survey session runs, events also go to <session>/probe.jsonl.

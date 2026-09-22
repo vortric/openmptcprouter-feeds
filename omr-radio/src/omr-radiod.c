@@ -179,11 +179,12 @@ static void peer_on_connected(peer_t *p, uint64_t mono)
     getsockopt(p->fd, SOL_SOCKET, SO_ERROR, &err, &el);
     if (err) { peer_close(p, mono, "connect failed"); return; }
     p->st = ST_CONNECTED; p->connected_since_mono = mono; p->backoff_ns = 2000000000ull; p->len = 0;
-    /* Start the silence timer at THIS connection: last_mono still holds the
+    /* The silence timer must start at THIS connection: last_mono holds the
      * previous connection's last line, which made the idle check fire
      * immediately on every reconnect (527 connect/disconnect cycles on one
-     * carrier during the 2026-09-20 drive). */
-    p->last_mono = 0;
+     * carrier during the 2026-09-20 drive). It is NOT cleared here, because
+     * last_recv_monotonic_ns is published and consumers use it to age the
+     * data; the timer below takes the later of the two instead. */
     char l[128]; snprintf(l, sizeof(l), "{\"event\":\"connected\"}");
     emit(p, l, now_ns(CLOCK_REALTIME), mono);
 }
@@ -279,7 +280,12 @@ int main(int argc, char **argv)
             peer_t *p = &cfg.p[i];
             if (p->st == ST_IDLE && mono >= p->next_try_mono) peer_try_connect(p, mono);
             else if (p->st == ST_CONNECTING && mono - p->connect_started_mono > 5000000000ull) peer_close(p, mono, "connect timeout");
-            else if (p->st == ST_CONNECTED && mono - (p->last_mono ? p->last_mono : p->connected_since_mono) > 15000000000ull) peer_close(p, mono, "no data for 15s");
+            else if (p->st == ST_CONNECTED) {
+                /* Silence is measured from the later of "connected" and "last
+                 * line", so a reconnect always gets a full window. */
+                uint64_t since = p->last_mono > p->connected_since_mono ? p->last_mono : p->connected_since_mono;
+                if (mono - since > 15000000000ull) peer_close(p, mono, "no data for 15s");
+            }
         }
         if (mono - last_state >= 1000000000ull) { write_state(); last_state = mono; }
         /* Last-resort self-heal: if nothing has been connected for 60 s

@@ -48,6 +48,12 @@ typedef struct {
     uint32_t next_seq;
     struct { uint32_t seq; uint64_t sent_mono, sent_real; } out[OUTSTANDING];
     uint64_t next_send_mono;
+    /* Bind-failure log throttle: the socket is reopened every latency_ms, so
+     * an absent device (tun0 before the tunnel is up, a WAN mid-flap) logged
+     * once per second per interface -- 85% of the router's syslog volume,
+     * which now also lands in the survey's syslog.log. */
+    uint64_t last_bind_warn_mono;
+    int bind_failing;
     /* counters + window for the state file */
     uint64_t sent, recvd, lost;
     double last_rtt_ms;
@@ -117,12 +123,32 @@ static void emit(const char *body_json, uint64_t real)
 }
 
 /* ── UDP echo probes ── */
+/* One throttled warning per interface: first failure, then at most once a
+ * minute while it stays down, then one line when it comes back. */
+static void bind_warn(iface_t *it, const char *what, int err)
+{
+    uint64_t now = now_ns(CLOCK_MONOTONIC);
+    if (!it->bind_failing || now - it->last_bind_warn_mono >= 60000000000ull) {
+        fprintf(stderr, "omr-probed: %s %s: %s%s\n", what, it->name, strerror(err),
+                it->bind_failing ? " (still down)" : "");
+        it->last_bind_warn_mono = now;
+    }
+    it->bind_failing = 1;
+}
+
 static int open_udp(iface_t *it)
 {
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd < 0) return -1;
+    if (fd < 0) { bind_warn(it, "socket", errno); return -1; }
     if (!cfg.no_bind && setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, it->name, strlen(it->name) + 1) < 0) {
-        fprintf(stderr, "omr-probed: SO_BINDTODEVICE %s: %s\n", it->name, strerror(errno)); close(fd); return -1;
+        int e = errno;
+        close(fd);
+        bind_warn(it, "SO_BINDTODEVICE", e);
+        return -1;
+    }
+    if (it->bind_failing) {
+        fprintf(stderr, "omr-probed: %s available again\n", it->name);
+        it->bind_failing = 0;
     }
     fcntl(fd, F_SETFL, O_NONBLOCK);
     return fd;

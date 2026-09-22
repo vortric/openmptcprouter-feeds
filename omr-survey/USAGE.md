@@ -35,7 +35,23 @@
 | `syslog capture ... empty` | `/etc/init.d/omr-survey` が古い。apk を入れ直す |
 | `disk ... MB free` が X | /srv/survey の古いセッションを削除 |
 
-## 3. 採集の開始と停止
+## 3. 採集開始の直前にやること (重要)
+
+WAN が 3 本とも `up` になってから **mqvpn を再起動**する。
+
+    ssh root@192.168.100.1 /etc/init.d/mqvpn restart
+
+理由は 2 つ。mqvpn は起動時に up の WAN しか path に登録しないため、WAN より先に起動すると
+どのキャリアにも紐づかない path が 1 本できる (0920 の走行データに残っている)。もう 1 つは、
+path は再生成のたびに新しい id を消費し、ある時点から per-path 統計に現れなくなる事象が
+あるため、セッションを新しい接続で始めたい。
+
+再起動後 1 分ほど待ち、`omr-survey-check` で次の 2 行が緑なことを確認する。
+
+- `per-path metrics  all N live path(s) present in get_status`
+- `unbound mqvpn path` の警告が出ていないこと
+
+## 4. 採集の開始と停止
 
     ubus call omr-survey start '{"session":"drive-20260921-01"}'   # 開始 (名前は英数字 . _ -)
     ubus call omr-survey status                                     # 進行状況 (samples が毎秒増える)
@@ -47,13 +63,13 @@
 - 停止せずに電源を切っても、書き込み済みの行は残る (meta.json の running が true のまま残るだけ)。
 - 長時間なら分割: `'{"session":"...","rotate_bytes":100000000}'` で survey.jsonl を 100 MB ごとに分割。
 
-## 4. 走行中に見るもの
+## 5. 走行中に見るもの
 
     ssh -t root@192.168.100.1 omr-survey-check -w
 
 `session` 行の samples / gnss / probe / radio が増え続けていれば正常。`last row: N source(s) failed` が続く場合はそのソースを確認。
 
-## 5. セッションに残るもの
+## 6. セッションに残るもの
 
 | ファイル | 中身 |
 |---|---|
@@ -65,34 +81,34 @@
 | `syslog.log` | 採集中のログ (mqvpn などの挙動を後から追うため) |
 | `meta.json` | 開始・停止時刻、サンプル数、停止理由 |
 
-## 6. データの回収 (走行後)
+## 7. データの回収 (走行後)
 
     scp -O root@192.168.100.1:/srv/survey/drive-20260921-01/*.jsonl ./drive-20260921-01/
     python3 openmptcprouter-feeds/omr-survey/tools/survey_join.py drive-20260921-01/survey.jsonl --summary > joined.jsonl
 
 ルータの scp は sftp-server が無いので `-O` が必要。
 
-## 7. 電源を切るとき
+## 8. 電源を切るとき
 
     ubus call omr-survey stop     # 採集中なら先に停止
     poweroff
 
 ハブとスマホはそのままで可。次回は 1 の順番で投入。
 
-## 8. やってはいけないこと
+## 9. やってはいけないこと
 
 - 走行中のルータ電源断・再起動 (スマホのテザリングが戻らないことがある)。
 - スマホの USB 抜き差し、ハブポートの入れ替え。
 - ルータ側でソフト的に USB を再列挙する操作 (unbind/bind、authorized)。
 - 採集中の `/etc/init.d/network reload` や WAN 設定変更。
 
-## 9. データ量の目安
+## 10. データ量の目安
 
 - survey.jsonl 約 100 MB/時、gnss.jsonl 約 8 MB/時、probe/radio 各 約 10 MB/時。空き 110 GB。
 - 能動計測 (omr-probe) は 3 回線 + トンネルで約 840 MB/時のモバイルデータを消費する (トンネル分は 3 回線に分散して乗る)。走らない日は `/etc/init.d/omr-probe stop`。
 - トンネル経由の計測 (tun0) は mqvpn のパスに実トラフィックを乗せる唯一の手段。これが無いと mqvpn の per-path 指標は無負荷のままで意味を持たない。
 
-## 10. サービス一覧
+## 11. サービス一覧
 
 | サービス | 役割 | 状態確認 |
 |---|---|---|

@@ -54,20 +54,51 @@ check_once() {
 	# get_status must report the live path ids, not a frozen old set
 	sids=$(echo "$MQ" | jsonfilter -e '@.status.clients[0].paths[*].path_id' 2>/dev/null | tr '\n' ' ')
 	lids=$(echo "$MQ" | jsonfilter -e '@.paths.path_info[@.live=true].path_id' 2>/dev/null | tr '\n' ' ')
-	matched=0
-	for l in $lids; do for sd in $sids; do [ "$l" = "$sd" ] && matched=$((matched+1)); done; done
-	if [ -z "$lids" ]; then warn "per-path metrics" "no live path yet"
-	elif [ "$matched" = "0" ]; then fail "per-path metrics" "live paths [$lids] absent from get_status [$sids] -> srtt/bytes will be missing; restart mqvpn"
-	else ok "per-path metrics" "$matched live path(s) present in get_status"; fi
+	matched=0; nlive=0
+	for l in $lids; do
+		nlive=$((nlive+1))
+		for sd in $sids; do [ "$l" = "$sd" ] && matched=$((matched+1)); done
+	done
+	# A partial match is the realistic failure: one carrier's path is recreated
+	# and drops out of get_status while the others stay, so that carrier records
+	# no srtt/bytes for the rest of the session.
+	if [ "$nlive" -gt 0 ] && [ "$matched" -lt "$nlive" ]; then
+		# A path added between two samples looks missing for a moment; take a
+		# second reading before calling it broken.
+		sleep 2
+		MQ2=$(ubus -S call mqvpn metrics 2>/dev/null)
+		sids=$(echo "$MQ2" | jsonfilter -e '@.status.clients[0].paths[*].path_id' 2>/dev/null | tr '\n' ' ')
+		lids=$(echo "$MQ2" | jsonfilter -e '@.paths.path_info[@.live=true].path_id' 2>/dev/null | tr '\n' ' ')
+		matched=0; nlive=0
+		for l in $lids; do
+			nlive=$((nlive+1))
+			for sd in $sids; do [ "$l" = "$sd" ] && matched=$((matched+1)); done
+		done
+	fi
+	if [ "$nlive" = "0" ]; then warn "per-path metrics" "no live path yet"
+	elif [ "$matched" = "0" ]; then fail "per-path metrics" "none of the $nlive live paths [$lids] are in get_status [$sids] -> no srtt/bytes at all; restart mqvpn"
+	elif [ "$matched" -lt "$nlive" ]; then fail "per-path metrics" "only $matched of $nlive live paths in get_status (live [$lids], status [$sids]) -> one carrier will record no srtt/bytes; restart mqvpn"
+	else ok "per-path metrics" "all $nlive live path(s) present in get_status"; fi
+	# A path with an empty iface is the unbound path mqvpn creates when it
+	# starts before any WAN is up. It burns a path slot and carries no WAN.
+	case "$MQ" in
+		*'"iface":""'*) warn "unbound mqvpn path" "mqvpn started before the WANs came up; restart mqvpn now so every path is bound to a carrier" ;;
+	esac
 	# tunnel probe (omr-probe with tunnel_interface set): the mqvpn load generator
 	tif=$(uci -q get omr-probe.settings.tunnel_interface)
 	if [ -n "$tif" ]; then
 		trtt=$(echo "$PROBE" | jsonfilter -e "@.interfaces['$tif'].udp.window.avg_ms" 2>/dev/null)
 		tsent=$(echo "$PROBE" | jsonfilter -e "@.interfaces['$tif'].udp.sent" 2>/dev/null)
 		tdown=$(echo "$PROBE" | jsonfilter -e "@.interfaces['$tif'].http_down.curl.speed_download" 2>/dev/null)
+		extra=""
+		if [ -n "$tdown" ]; then
+			# curl reports bytes/s; show tenths of Mbps with integer math
+			t10=$(( ${tdown%.*} * 80 / 1000000 ))
+			extra=", last down $((t10 / 10)).$((t10 % 10)) Mbps"
+		fi
 		if [ -n "$tsent" ] && [ "${tsent:-0}" -gt 0 ]; then
-			ok "tunnel probe ($tif)" "rtt=${trtt}ms sent=${tsent}$([ -n "$tdown" ] && echo \", last down $((${tdown%.*}/125000)) Mbps\")"
-		else warn "tunnel probe ($tif)" "no probe yet (tunnel up? omr-probe restarted after tun0 appeared?)"; fi
+			ok "tunnel probe ($tif)" "rtt=${trtt}ms sent=${tsent}${extra}"
+		else warn "tunnel probe ($tif)" "no probe yet (tunnel up? omr-probe restarted after $tif appeared?)"; fi
 	fi
 
 	hdr "GNSS"
@@ -82,11 +113,13 @@ check_once() {
 	SS=$(ubus -S call omr-survey status 2>/dev/null); run=$(echo "$SS" | jsonfilter -e '@.running' 2>/dev/null)
 	if [ "$run" = "true" ]; then
 		sid=$(echo "$SS" | jsonfilter -e '@.current.session'); n=$(echo "$SS" | jsonfilter -e '@.current.samples'); ge=$(echo "$SS" | jsonfilter -e '@.current.gnss_events')
-		pe=$(cat "$BASE/$sid/probe.jsonl" 2>/dev/null | wc -l | tr -d ' '); re=$(cat "$BASE/$sid/radio.jsonl" 2>/dev/null | wc -l | tr -d ' ')
 		last=$(tail -n1 "$BASE/$sid/survey.jsonl" 2>/dev/null); bad=$(echo "$last" | grep -o '"ok":false' | wc -l | tr -d ' ')
-		sl=$(cat "$BASE/$sid/syslog.log" 2>/dev/null | wc -l | tr -d ' ')
-		if [ "${bad:-0}" = "0" ]; then ok "session $sid" "samples=$n gnss=$ge probe=$pe radio=$re syslog=$sl (last row: all sources ok)"; else warn "session $sid" "samples=$n gnss=$ge probe=$pe radio=$re syslog=$sl (last row: $bad source(s) failed)"; fi
-		[ "${sl:-0}" = "0" ] && warn "syslog capture" "syslog.log is empty (logread -f child not running?)"
+		# Sizes, not line counts: these files reach tens of MB and -w rereads
+		# them every 2 s. An empty syslog.log is normal until the router logs
+		# something, so only its absence is a problem.
+		mb() { s=$(stat -c %s "$1" 2>/dev/null); [ -n "$s" ] && echo "$((s / 1024))KB" || echo "-"; }
+		if [ "${bad:-0}" = "0" ]; then ok "session $sid" "samples=$n gnss=$ge probe=$(mb "$BASE/$sid/probe.jsonl") radio=$(mb "$BASE/$sid/radio.jsonl") syslog=$(mb "$BASE/$sid/syslog.log") (last row: all sources ok)"; else warn "session $sid" "samples=$n gnss=$ge (last row: $bad source(s) failed)"; fi
+		[ -f "$BASE/$sid/syslog.log" ] || warn "syslog capture" "syslog.log missing (logread -f child not started?)"
 	else warn "session" "none running  -> ubus call omr-survey start '{\"session\":\"NAME\"}'"; fi
 	free=$(df -m "$BASE" 2>/dev/null | awk 'NR==2{print $4}')
 	if [ "${free:-0}" -gt 2000 ]; then ok "disk $BASE" "${free} MB free"; else fail "disk $BASE" "${free:-?} MB free"; fi

@@ -50,6 +50,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -212,35 +213,56 @@ static int payload_ok(const char *p, size_t len)
 
 static pid_t g_logpid = 0;
 
+/* Fork a child that runs `logread ...` with stdout on `path`.
+ * The child must not outlive the recorder: PR_SET_PDEATHSIG plus a
+ * getppid() recheck closes the window where the parent dies between fork
+ * and prctl, and SIGTERM is reset to default so the inherited handler
+ * cannot swallow the death signal. */
+static pid_t spawn_logread(const char *path, const char *arg, int truncate)
+{
+    pid_t parent = getpid();
+    pid_t pid = fork();
+    if (pid != 0) return pid;
+
+    signal(SIGTERM, SIG_DFL);
+    signal(SIGINT, SIG_DFL);
+    signal(SIGHUP, SIG_DFL);
+    /* musl's prctl() is variadic and reads four unsigned longs. */
+    prctl(PR_SET_PDEATHSIG, (unsigned long)SIGTERM, 0UL, 0UL, 0UL);
+    if (getppid() != parent) _exit(0);
+
+    int fd = open(path, O_WRONLY | O_CREAT | (truncate ? O_TRUNC : O_APPEND), 0644);
+    if (fd >= 0) { dup2(fd, STDOUT_FILENO); close(fd); }
+    int dn = open("/dev/null", O_WRONLY);
+    if (dn >= 0) { dup2(dn, STDERR_FILENO); close(dn); }
+    if (arg) execlp("logread", "logread", arg, (char *)NULL);
+    else execlp("logread", "logread", (char *)NULL);
+    _exit(127);
+}
+
 static void start_log_capture(void)
 {
     char path[700];
-    /* snapshot of the ring buffer as it stands now */
-    snprintf(path, sizeof(path), "%s/syslog-start.log", g_dir);
-    pid_t pid = fork();
-    if (pid == 0) {
-        int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (fd >= 0) { dup2(fd, STDOUT_FILENO); close(fd); }
-        int dn = open("/dev/null", O_WRONLY);
-        if (dn >= 0) { dup2(dn, STDERR_FILENO); close(dn); }
-        execlp("logread", "logread", (char *)NULL);
-        _exit(127);
-    }
-    if (pid > 0) { int st; while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {} }
-
-    /* follow everything from here on */
+    /* Follower FIRST: anything logged between the snapshot's read and the
+     * follower's subscribe would otherwise be in neither file. Starting it
+     * first turns that gap into a harmless overlap. */
     snprintf(path, sizeof(path), "%s/syslog.log", g_dir);
-    pid = fork();
-    if (pid < 0) return;
-    if (pid == 0) {
-        int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
-        if (fd >= 0) { dup2(fd, STDOUT_FILENO); close(fd); }
-        int dn = open("/dev/null", O_WRONLY);
-        if (dn >= 0) { dup2(dn, STDERR_FILENO); close(dn); }
-        execlp("logread", "logread", "-f", (char *)NULL);
-        _exit(127);
+    g_logpid = spawn_logread(path, "-f", 0);
+
+    /* Then the ring buffer as it stands, for context before the session. */
+    snprintf(path, sizeof(path), "%s/syslog-start.log", g_dir);
+    pid_t pid = spawn_logread(path, NULL, 1);
+    if (pid > 0) {
+        int st;
+        for (int i = 0; i < 50; i++) {
+            pid_t r = waitpid(pid, &st, WNOHANG);
+            if (r == pid) { pid = 0; break; }
+            if (r < 0 && errno != EINTR) { pid = 0; break; }
+            struct timespec ts = {0, 100000000};
+            nanosleep(&ts, NULL);
+        }
+        if (pid > 0) { kill(pid, SIGKILL); waitpid(pid, &st, 0); }
     }
-    g_logpid = pid;
 }
 
 static void stop_log_capture(void)
@@ -248,7 +270,15 @@ static void stop_log_capture(void)
     if (g_logpid <= 0) return;
     kill(g_logpid, SIGTERM);
     int st;
-    while (waitpid(g_logpid, &st, 0) < 0 && errno == EINTR) {}
+    for (int i = 0; i < 20; i++) {
+        pid_t r = waitpid(g_logpid, &st, WNOHANG);
+        if (r == g_logpid) { g_logpid = 0; return; }
+        if (r < 0 && errno != EINTR) break;
+        struct timespec ts = {0, 100000000};
+        nanosleep(&ts, NULL);
+    }
+    kill(g_logpid, SIGKILL);
+    waitpid(g_logpid, &st, 0);
     g_logpid = 0;
 }
 
@@ -484,8 +514,10 @@ int main(int argc, char **argv)
 
     g_start_real_ns = now_ns(CLOCK_REALTIME);
     g_start_mono_ns = now_ns(CLOCK_MONOTONIC);
-    start_log_capture();
+    /* meta.json first: the rpcd start handler waits for it to decide whether
+     * the daemon came up, and the log snapshot below can take a moment. */
     write_meta(NULL);
+    start_log_capture();
 
     const char *reason = "signal";
     uint64_t interval_ns = (uint64_t)cfg.interval_ms * 1000000ull;

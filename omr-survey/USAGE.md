@@ -30,6 +30,9 @@
 | `radio=false` が 1 回線だけ | その端末で「OMR Radio」アプリを開く (サービスが再起動する) |
 | `no live mqvpn path` | 1 分待つ。直らなければ `/etc/init.d/mqvpn restart` |
 | `GNSS ... not connected` | OPPO 側の送信を再開 (宛先 192.168.100.1:8620、TCP) |
+| `per-path metrics ... absent from get_status` | `/etc/init.d/mqvpn restart`。放置すると mqvpn の srtt/バイト数がセッション中ずっと欠測になる |
+| `tunnel probe ... no probe yet` | トンネルが上がってから 2 分待つ。残るなら `/etc/init.d/omr-probe restart` |
+| `syslog capture ... empty` | `/etc/init.d/omr-survey` が古い。apk を入れ直す |
 | `disk ... MB free` が X | /srv/survey の古いセッションを削除 |
 
 ## 3. 採集の開始と停止
@@ -50,33 +53,46 @@
 
 `session` 行の samples / gnss / probe / radio が増え続けていれば正常。`last row: N source(s) failed` が続く場合はそのソースを確認。
 
-## 5. データの回収 (走行後)
+## 5. セッションに残るもの
+
+| ファイル | 中身 |
+|---|---|
+| `survey.jsonl` | 1 秒ごとの封筒 (omr / mqvpn / network / gnss / probe / radio の生データ) |
+| `gnss.jsonl` | NMEA を受信レートそのままで 1 文 1 行 |
+| `probe.jsonl` | 能動計測のイベント (UDP エコー、容量)。tun0 = トンネル経由の計測も含む |
+| `radio.jsonl` | スマホの電波テレメトリ |
+| `syslog-start.log` | 採集開始時点のログリング全体 |
+| `syslog.log` | 採集中のログ (mqvpn などの挙動を後から追うため) |
+| `meta.json` | 開始・停止時刻、サンプル数、停止理由 |
+
+## 6. データの回収 (走行後)
 
     scp -O root@192.168.100.1:/srv/survey/drive-20260921-01/*.jsonl ./drive-20260921-01/
     python3 openmptcprouter-feeds/omr-survey/tools/survey_join.py drive-20260921-01/survey.jsonl --summary > joined.jsonl
 
 ルータの scp は sftp-server が無いので `-O` が必要。
 
-## 6. 電源を切るとき
+## 7. 電源を切るとき
 
     ubus call omr-survey stop     # 採集中なら先に停止
     poweroff
 
 ハブとスマホはそのままで可。次回は 1 の順番で投入。
 
-## 7. やってはいけないこと
+## 8. やってはいけないこと
 
 - 走行中のルータ電源断・再起動 (スマホのテザリングが戻らないことがある)。
 - スマホの USB 抜き差し、ハブポートの入れ替え。
 - ルータ側でソフト的に USB を再列挙する操作 (unbind/bind、authorized)。
 - 採集中の `/etc/init.d/network reload` や WAN 設定変更。
 
-## 8. データ量の目安
+## 9. データ量の目安
 
 - survey.jsonl 約 100 MB/時、gnss.jsonl 約 8 MB/時、probe/radio 各 約 10 MB/時。空き 110 GB。
-- 能動計測 (omr-probe) は 3 回線合計で約 630 MB/時のモバイルデータを消費する。走らない日は `/etc/init.d/omr-probe stop`。
+- 能動計測 (omr-probe) は 3 回線 + トンネルで約 840 MB/時のモバイルデータを消費する (トンネル分は 3 回線に分散して乗る)。走らない日は `/etc/init.d/omr-probe stop`。
+- トンネル経由の計測 (tun0) は mqvpn のパスに実トラフィックを乗せる唯一の手段。これが無いと mqvpn の per-path 指標は無負荷のままで意味を持たない。
 
-## 9. サービス一覧
+## 10. サービス一覧
 
 | サービス | 役割 | 状態確認 |
 |---|---|---|

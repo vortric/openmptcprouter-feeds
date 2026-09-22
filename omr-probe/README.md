@@ -19,7 +19,7 @@ Every result is one JSON event, e.g.
  "sent_realtime_ns":1789806490784483435,"sent_monotonic_ns":47147339400331,"rtt_ms":54.971}
 {"seq":140,"session":"drive-01","type":"http_down","iface":"usb-docomo","bytes":5000000,
  "start_realtime_ns":...,"start_monotonic_ns":...,"end_monotonic_ns":...,"curl_exit":0,
- "curl":{"http_code":200,"time_connect":0.111,"time_starttransfer":0.226,"time_total":0.82,
+ "curl":{"http_code":"200","time_connect":0.111,"time_starttransfer":0.226,"time_total":0.82,
          "size_download":5000000,"speed_download":6115444,...}}
 ```
 

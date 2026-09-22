@@ -188,7 +188,10 @@ static void udp_expire(iface_t *it, uint64_t mono)
 
 /* ── capacity probes via curl (one child at a time) ── */
 static const char *CURL_W =
-    "{\"http_code\":%{http_code},\"exitcode\":%{exitcode},\"remote_ip\":\"%{remote_ip}\","
+    /* http_code is quoted: curl prints it zero-padded ("000" on failure),
+     * which is not valid JSON as a bare number (2 rows lost on the
+     * 2026-09-20 drive). Kept verbatim as a string rather than normalized. */
+    "{\"http_code\":\"%{http_code}\",\"exitcode\":%{exitcode},\"remote_ip\":\"%{remote_ip}\","
     "\"time_namelookup\":%{time_namelookup},\"time_connect\":%{time_connect},"
     "\"time_starttransfer\":%{time_starttransfer},\"time_total\":%{time_total},"
     "\"size_download\":%{size_download},\"speed_download\":%{speed_download},"

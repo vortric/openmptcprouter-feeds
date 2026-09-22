@@ -20,7 +20,8 @@
     ssh root@192.168.100.1 omr-survey-check        # 1 回
     ssh -t root@192.168.100.1 omr-survey-check -w  # 2 秒ごと更新 (Ctrl-C で終了)
 
-`RESULT: OK` になれば採集可能。行頭 `X` は要対処、`!` は注意:
+`RESULT: OK` になれば採集可能 (GNSS 送信を始めるまで GNSS だけ赤のことがある)。
+行頭 `X` は要対処、`!` は注意:
 
 | 表示 | 対処 |
 |---|---|
@@ -30,28 +31,68 @@
 | `radio=false` が 1 回線だけ | その端末で「OMR Radio」アプリを開く (サービスが再起動する) |
 | `no live mqvpn path` | 1 分待つ。直らなければ `/etc/init.d/mqvpn restart` |
 | `GNSS ... not connected` | OPPO 側の送信を再開 (宛先 192.168.100.1:8620、TCP) |
-| `per-path metrics ... absent from get_status` | `/etc/init.d/mqvpn restart`。放置すると mqvpn の srtt/バイト数がセッション中ずっと欠測になる |
+| `per-path metrics ... absent from get_status` | `/etc/init.d/mqvpn restart` (§4 参照)。放置すると mqvpn の srtt/バイト数がセッション中ずっと欠測になる |
 | `tunnel probe ... no probe yet` | トンネルが上がってから 2 分待つ。残るなら `/etc/init.d/omr-probe restart` |
 | `syslog capture ... empty` | `/etc/init.d/omr-survey` が古い。apk を入れ直す |
 | `disk ... MB free` が X | /srv/survey の古いセッションを削除 |
 
 ## 3. 採集開始の直前にやること (重要)
 
-WAN が 3 本とも `up` になってから **mqvpn を再起動**する。
+**WAN が 3 本とも `up` になってから mqvpn を再起動し、それから採集を開始する。**
 
     ssh root@192.168.100.1 /etc/init.d/mqvpn restart
+    # 1 分ほど待ってから
+    ssh root@192.168.100.1 omr-survey-check
 
-理由は 2 つ。mqvpn は起動時に up の WAN しか path に登録しないため、WAN より先に起動すると
-どのキャリアにも紐づかない path が 1 本できる (0920 の走行データに残っている)。もう 1 つは、
-path は再生成のたびに新しい id を消費し、ある時点から per-path 統計に現れなくなる事象が
-あるため、セッションを新しい接続で始めたい。
+理由は 2 つある。
 
-再起動後 1 分ほど待ち、`omr-survey-check` で次の 2 行が緑なことを確認する。
+1 つ目は確実な理由。mqvpn は起動時に `up` の WAN しか `Path =` に書かないので、WAN より先に
+起動すると、どのキャリアにも紐づかない path が 1 本できる。0920 の走行データには 4 時間ずっと
+残っていた。
 
-- `per-path metrics  all N live path(s) present in get_status`
-- `unbound mqvpn path` の警告が出ていないこと
+2 つ目は**原因未特定の事象への予防**。0920 は接続開始から約 6 分後、path が 8 本作られた
+時点を境に、それ以降に再生成された path が `get_status` に現れなくなり、per-path 指標
+(srtt / バイト数 / 損失) が 3.5 時間にわたり全欠測になった。分かっていること:
 
-## 4. 採集の開始と停止
+- path_id の枯渇ではない。サーバ側の MAX_PATH_ID 付与が効いていて id は 61 まで伸びていた
+- QUIC 接続の張り直しも起きていない (connected_sec は単調増加)
+- xquic は `path_state >= ACTIVE` の path しか統計に入れないので、**再生成された path が
+  検証 (PATH_CHALLENGE/RESPONSE) を完了していない**のが直接の原因
+- なぜ検証が通らなくなるかは未特定。走行時のログが再起動で消えていて追えなかった
+
+mqvpn を再起動すると新しい接続で始まり、この状態は解消する (実機で確認済み)。ただし
+**走行中に再発しうる** (0920 はセッション開始 6 分後に発生した)。今回からログをセッションに
+保存するので、再発しても原因を追える。
+
+再起動後、`omr-survey-check` で次を確認する。
+
+- `per-path metrics  all N live path(s) present in get_status` が緑
+- `unbound mqvpn path` の警告が出ていない
+- `tunnel probe (tun0)` に RTT が出ている (トンネルに負荷がかかっている印。無負荷だと
+  per-path 指標が更新されない)
+
+## 4. 走行中に per-path 指標が落ちたら
+
+車を停めたときに確認する。走行しながらの操作はしない。
+
+    ssh root@192.168.100.1 omr-survey-check
+
+`per-path metrics` が赤 (`only N of M` または `none of`) なら、**セッションを止めて、mqvpn を
+再起動して、新しいセッションを始める**。
+
+    ubus call omr-survey stop
+    /etc/init.d/mqvpn restart
+    # 1 分待って omr-survey-check が緑になってから
+    ubus call omr-survey start '{"session":"drive-YYYYMMDD-02"}'
+
+セッションの途中で再起動しないこと。トンネルが切れた前後が 1 つのセッションに混ざると、
+後処理で接続の切れ目が分からなくなる。セッションを分ければ、それぞれが 1 つの QUIC 接続に
+対応する。
+
+per-path 指標が落ちても、**キャリア単体の計測 (probe) と電波 (radio) と位置 (GNSS) は
+影響を受けない**。調査の主目的であるキャリア品質マップは、この事象が起きても成立する。
+
+## 5. 採集の開始と停止
 
     ubus call omr-survey start '{"session":"drive-20260921-01"}'   # 開始 (名前は英数字 . _ -)
     ubus call omr-survey status                                     # 進行状況 (samples が毎秒増える)
@@ -63,13 +104,13 @@ path は再生成のたびに新しい id を消費し、ある時点から per-
 - 停止せずに電源を切っても、書き込み済みの行は残る (meta.json の running が true のまま残るだけ)。
 - 長時間なら分割: `'{"session":"...","rotate_bytes":100000000}'` で survey.jsonl を 100 MB ごとに分割。
 
-## 5. 走行中に見るもの
+## 6. 走行中に見るもの
 
     ssh -t root@192.168.100.1 omr-survey-check -w
 
 `session` 行の samples / gnss / probe / radio が増え続けていれば正常。`last row: N source(s) failed` が続く場合はそのソースを確認。
 
-## 6. セッションに残るもの
+## 7. セッションに残るもの
 
 | ファイル | 中身 |
 |---|---|
@@ -81,34 +122,36 @@ path は再生成のたびに新しい id を消費し、ある時点から per-
 | `syslog.log` | 採集中のログ (mqvpn などの挙動を後から追うため) |
 | `meta.json` | 開始・停止時刻、サンプル数、停止理由 |
 
-## 7. データの回収 (走行後)
+## 8. データの回収 (走行後)
 
     scp -O root@192.168.100.1:/srv/survey/drive-20260921-01/*.jsonl ./drive-20260921-01/
     python3 openmptcprouter-feeds/omr-survey/tools/survey_join.py drive-20260921-01/survey.jsonl --summary > joined.jsonl
 
 ルータの scp は sftp-server が無いので `-O` が必要。
 
-## 8. 電源を切るとき
+## 9. 電源を切るとき
 
     ubus call omr-survey stop     # 採集中なら先に停止
     poweroff
 
 ハブとスマホはそのままで可。次回は 1 の順番で投入。
 
-## 9. やってはいけないこと
+## 10. やってはいけないこと
 
 - 走行中のルータ電源断・再起動 (スマホのテザリングが戻らないことがある)。
 - スマホの USB 抜き差し、ハブポートの入れ替え。
 - ルータ側でソフト的に USB を再列挙する操作 (unbind/bind、authorized)。
 - 採集中の `/etc/init.d/network reload` や WAN 設定変更。
+- **セッションの途中で mqvpn を再起動する**こと。直す必要があるときは §4 のとおり、
+  いったんセッションを止めてから再起動し、新しいセッションを始める。
 
-## 10. データ量の目安
+## 11. データ量の目安
 
 - survey.jsonl 約 100 MB/時、gnss.jsonl 約 8 MB/時、probe/radio 各 約 10 MB/時。空き 110 GB。
 - 能動計測 (omr-probe) は 3 回線 + トンネルで約 840 MB/時のモバイルデータを消費する (トンネル分は 3 回線に分散して乗る)。走らない日は `/etc/init.d/omr-probe stop`。
 - トンネル経由の計測 (tun0) は mqvpn のパスに実トラフィックを乗せる唯一の手段。これが無いと mqvpn の per-path 指標は無負荷のままで意味を持たない。
 
-## 11. サービス一覧
+## 12. サービス一覧
 
 | サービス | 役割 | 状態確認 |
 |---|---|---|

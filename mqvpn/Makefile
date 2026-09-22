@@ -17,6 +17,12 @@ PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL:=https://github.com/vortric/mqvpn-omr.git
 PKG_SOURCE_VERSION:=226355a085fecdcbc1347c8aaa088959700ddba5
 PKG_MIRROR_HASH:=skip
+# The source revision MUST be in the tarball name. OpenWrt skips the download
+# when dl/<name> already exists, so with the default name
+# (mqvpn-$(PKG_VERSION).tar.zst) a new PKG_SOURCE_VERSION silently rebuilt the
+# old checkout: the 2026-09-19 r4 build shipped the r3 source, and the fix it
+# was supposed to carry never reached the router.
+PKG_SOURCE:=$(PKG_NAME)-$(PKG_VERSION)-$(PKG_SOURCE_VERSION).tar.zst
 
 PKG_BUILD_PARALLEL:=1
 PKG_USE_MIPS16:=0

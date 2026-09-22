@@ -26,6 +26,7 @@
 | 表示 | 対処 |
 |---|---|
 | `NO-ADDR ... toggle USB tethering` | その端末で USB テザリングを一度オフ→オン (再起動後に自動復帰しないことがある) |
+| アドレスは付いているのに `loss` が 100% に近い | その端末で USB テザリングをオフ→オン。Android の RNDIS が応答フレームの宛先 MAC を全ゼロで送る状態に陥ることがあり (2026-09-22 に au で発生)、ICMP だけ通って TCP/UDP が全滅する |
 | `tracker not up yet` | 1〜2 分待つ |
 | `radio=false` が 3 回線同時 | `/etc/init.d/omr-radio restart` (60 秒待てば自動でも復帰) |
 | `radio=false` が 1 回線だけ | その端末で「OMR Radio」アプリを開く (サービスが再起動する) |
@@ -44,53 +45,37 @@
     # 1 分ほど待ってから
     ssh root@192.168.100.1 omr-survey-check
 
-理由は 2 つある。
+mqvpn は起動時に `up` の WAN しか `Path =` に書かないので、WAN より先に起動すると、どの
+キャリアにも紐づかない path が 1 本できる。0920 の走行データには 4 時間ずっと残っていた。
+`omr-survey-check` の `unbound mqvpn path` 警告がこれを検出する。
 
-1 つ目は確実な理由。mqvpn は起動時に `up` の WAN しか `Path =` に書かないので、WAN より先に
-起動すると、どのキャリアにも紐づかない path が 1 本できる。0920 の走行データには 4 時間ずっと
-残っていた。
-
-2 つ目は**原因未特定の事象への予防**。0920 は接続開始から約 6 分後、path が 8 本作られた
-時点を境に、それ以降に再生成された path が `get_status` に現れなくなり、per-path 指標
-(srtt / バイト数 / 損失) が 3.5 時間にわたり全欠測になった。分かっていること:
-
-- path_id の枯渇ではない。サーバ側の MAX_PATH_ID 付与が効いていて id は 61 まで伸びていた
-- QUIC 接続の張り直しも起きていない (connected_sec は単調増加)
-- xquic は `path_state >= ACTIVE` の path しか統計に入れないので、**再生成された path が
-  検証 (PATH_CHALLENGE/RESPONSE) を完了していない**のが直接の原因
-- なぜ検証が通らなくなるかは未特定。走行時のログが再起動で消えていて追えなかった
-
-mqvpn を再起動すると新しい接続で始まり、この状態は解消する (実機で確認済み)。ただし
-**走行中に再発しうる** (0920 はセッション開始 6 分後に発生した)。今回からログをセッションに
-保存するので、再発しても原因を追える。
-
-再起動後、`omr-survey-check` で次を確認する。
+再起動後、次を確認する。
 
 - `per-path metrics  all N live path(s) present in get_status` が緑
 - `unbound mqvpn path` の警告が出ていない
-- `tunnel probe (tun0)` に RTT が出ている (トンネルに負荷がかかっている印。無負荷だと
-  per-path 指標が更新されない)
+- `tunnel probe (tun0)` に RTT が出ている (トンネルに負荷がかかっている印)
 
-## 4. 走行中に per-path 指標が落ちたら
+## 4. per-path 指標の欠測について (2026-09-22 に解決済み)
 
-車を停めたときに確認する。走行しながらの操作はしない。
+0920 の走行では、接続開始から約 6 分後を境に per-path 指標 (srtt / バイト数 / 損失) が
+3.5 時間にわたり全欠測した。**真因は特定し修正済み**なので、通常は再発しない。
 
-    ssh root@192.168.100.1 omr-survey-check
+真因は `mqvpn_client_get_info()` が xquic の統計配列を**作成順のまま先頭 8 件
+(MQVPN_MAX_PATHS) で打ち切っていた**こと。走行中は WAN のフラップごとに path が作り直され、
+8 本を超えた時点で以降の path が一切報告されなくなっていた。path 自体は正常に通信していた
+(検証が通らないわけではなかった)。修正は live な path を先に並べるもので、実機で
+path_id 14 まで再生成しても 3 本すべてが報告されることを確認済み (mqvpn r4、2026-09-22 版)。
 
-`per-path metrics` が赤 (`only N of M` または `none of`) なら、**セッションを止めて、mqvpn を
-再起動して、新しいセッションを始める**。
+万一 `omr-survey-check` で `per-path metrics` が赤になったら、停車時に次を行う。
 
     ubus call omr-survey stop
     /etc/init.d/mqvpn restart
     # 1 分待って omr-survey-check が緑になってから
     ubus call omr-survey start '{"session":"drive-YYYYMMDD-02"}'
 
-セッションの途中で再起動しないこと。トンネルが切れた前後が 1 つのセッションに混ざると、
-後処理で接続の切れ目が分からなくなる。セッションを分ければ、それぞれが 1 つの QUIC 接続に
-対応する。
-
-per-path 指標が落ちても、**キャリア単体の計測 (probe) と電波 (radio) と位置 (GNSS) は
-影響を受けない**。調査の主目的であるキャリア品質マップは、この事象が起きても成立する。
+セッションの途中で mqvpn を再起動しないこと。1 つのセッションが 2 つの QUIC 接続にまたがると、
+後処理で接続の切れ目が分からなくなる。なお per-path 指標が落ちても、**キャリア単体の計測
+(probe)、電波 (radio)、位置 (GNSS) は影響を受けない**。
 
 ## 5. 採集の開始と停止
 

@@ -13,6 +13,11 @@ config settings 'settings'
 	# paths, without which its per-path metrics stay idle. Empty = off.
 	# Empty = use mqvpn.interface.tun_name (keeps one source of truth).
 	option tunnel_interface ''
+	# Address to probe THROUGH the tunnel. Must be reachable via the tunnel:
+	# the probe server's public address is host-routed to a WAN, so probing it
+	# would measure a carrier, not the tunnel. Empty = the tunnel's default
+	# gateway (the server's own tunnel address), resolved at service start.
+	option tunnel_host ''
 	# UDP echo cadence / timeout (per interface).
 	option latency_ms '1000'
 	option udp_timeout_ms '2000'

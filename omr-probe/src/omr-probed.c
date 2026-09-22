@@ -54,6 +54,13 @@ typedef struct {
      * which now also lands in the survey's syslog.log. */
     uint64_t last_bind_warn_mono;
     int bind_failing;
+    /* Per-interface target. The tunnel needs its own: the probe server's
+     * public address is pinned to a WAN by a host route (so the VPN does not
+     * route through itself), so a socket bound to the tunnel sends there but
+     * the reply comes back on the WAN and never reaches it -- 330 of 330
+     * probes lost on the rig. Target the tunnel's far end instead. */
+    struct sockaddr_in dst;
+    char http_base[192];
     /* counters + window for the state file */
     uint64_t sent, recvd, lost;
     double last_rtt_ms;
@@ -122,6 +129,25 @@ static void emit(const char *body_json, uint64_t real)
     if (g_sess) { fprintf(g_sess, "{\"seq\":%llu,\"session\":", (unsigned long long)g_sess_seq++); json_puts(g_sess, g_sess_name); fprintf(g_sess, ",%s}\n", body_json); fflush(g_sess); }
 }
 
+/* iface[@host]: an explicit host overrides the global probe server for that
+ * interface only. */
+static int iface_set_target(iface_t *it, const char *host)
+{
+    it->dst.sin_family = AF_INET;
+    it->dst.sin_port = htons((uint16_t)cfg.udp_port);
+    if (inet_pton(AF_INET, host, &it->dst.sin_addr) != 1) return -1;
+    if (cfg.http_base && *cfg.http_base) {
+        /* Replace the host in the configured base URL, keeping scheme/port. */
+        const char *scheme_end = strstr(cfg.http_base, "://");
+        const char *rest = scheme_end ? scheme_end + 3 : cfg.http_base;
+        const char *port = strchr(rest, ':');
+        snprintf(it->http_base, sizeof(it->http_base), "%.*s%s%s",
+                 scheme_end ? (int)(scheme_end - cfg.http_base) + 3 : 0, cfg.http_base,
+                 host, port ? port : "");
+    }
+    return 0;
+}
+
 /* ── UDP echo probes ── */
 /* One throttled warning per interface: first failure, then at most once a
  * minute while it stays down, then one line when it comes back. */
@@ -154,8 +180,10 @@ static int open_udp(iface_t *it)
     return fd;
 }
 
-static void udp_send(iface_t *it, const struct sockaddr_in *dst, uint64_t mono, uint64_t real)
+static void udp_send(iface_t *it, const struct sockaddr_in *dst_unused, uint64_t mono, uint64_t real)
 {
+    const struct sockaddr_in *dst = &it->dst;
+    (void)dst_unused;
     if (it->fd < 0) { it->fd = open_udp(it); if (it->fd < 0) return; }
     char pkt[64];
     uint32_t seq = it->next_seq++;
@@ -242,8 +270,9 @@ static void cap_start(int iface, int up)
 {
     int pfd[2]; if (pipe(pfd) < 0) return;
     char url[512], bytes[300], maxs[16];
-    if (up) snprintf(url, sizeof(url), "%s/up", cfg.http_base);
-    else snprintf(url, sizeof(url), "%s/down?bytes=%ld", cfg.http_base, cfg.down_bytes);
+    const char *base = cfg.ifs[iface].http_base[0] ? cfg.ifs[iface].http_base : cfg.http_base;
+    if (up) snprintf(url, sizeof(url), "%s/up", base);
+    else snprintf(url, sizeof(url), "%s/down?bytes=%ld", base, cfg.down_bytes);
     snprintf(bytes, sizeof(bytes), "@%s", g_upfile);
     snprintf(maxs, sizeof(maxs), "%d", cfg.cap_max_s);
     pid_t pid = fork();
@@ -315,7 +344,7 @@ static void write_state(void)
 
 static void usage(void)
 {
-    fputs("usage: omr-probed -H host [-p udp_port] [-u http_base] -i iface [-i iface ...]\n"
+    fputs("usage: omr-probed -H host [-p udp_port] [-u http_base] -i iface[@host] [-i ...]\n"
           "  [-l latency_ms] [-t udp_timeout_ms] [-P capacity_period_s] [-D down_bytes] [-U up_bytes]\n"
           "  [-m capacity_max_s] [-s state.json] [-r rawlog_dir] [-S survey_base] [-N (no bind, test)]\n", stderr);
     exit(2);
@@ -332,7 +361,22 @@ int main(int argc, char **argv)
         case 'H': cfg.host = optarg; break;
         case 'p': cfg.udp_port = atoi(optarg); break;
         case 'u': cfg.http_base = (*optarg ? optarg : NULL); break;
-        case 'i': if (cfg.n_if < MAX_IF && *optarg) { snprintf(cfg.ifs[cfg.n_if].name, IFNAMSIZ, "%s", optarg); cfg.ifs[cfg.n_if].fd = -1; cfg.n_if++; } break;
+        case 'i':
+            if (cfg.n_if < MAX_IF && *optarg) {
+                char spec[128];
+                snprintf(spec, sizeof(spec), "%s", optarg);
+                char *at = strchr(spec, '@');
+                if (at) *at++ = '\0';
+                spec[IFNAMSIZ - 1] = '\0';
+                memcpy(cfg.ifs[cfg.n_if].name, spec, strlen(spec) + 1);
+                cfg.ifs[cfg.n_if].fd = -1;
+                /* Remembered with an '@' marker until the global target is
+                 * known, which is only after getopt finishes. */
+                if (at && *at)
+                    snprintf(cfg.ifs[cfg.n_if].http_base, sizeof(cfg.ifs[cfg.n_if].http_base), "@%s", at);
+                cfg.n_if++;
+            }
+            break;
         case 'l': cfg.latency_ms = atoi(optarg); break;
         case 't': cfg.udp_timeout_ms = atoi(optarg); break;
         case 'P': cfg.cap_period_s = atoi(optarg); break;
@@ -350,6 +394,22 @@ int main(int argc, char **argv)
 
     struct sockaddr_in dst = {0}; dst.sin_family = AF_INET; dst.sin_port = htons((uint16_t)cfg.udp_port);
     if (inet_pton(AF_INET, cfg.host, &dst.sin_addr) != 1) { fputs("omr-probed: -H must be an IPv4 address\n", stderr); return 1; }
+    for (int i = 0; i < cfg.n_if; i++) {
+        iface_t *it = &cfg.ifs[i];
+        if (it->http_base[0] == '@') {
+            char host[64];
+            snprintf(host, sizeof(host), "%s", it->http_base + 1);
+            it->http_base[0] = '\0';
+            if (iface_set_target(it, host) < 0) {
+                fprintf(stderr, "omr-probed: -i %s@%s: not an IPv4 address\n", it->name, host);
+                return 1;
+            }
+            fprintf(stderr, "omr-probed: %s targets %s (own endpoint)\n", it->name, host);
+        } else {
+            it->dst = dst;
+            it->http_base[0] = '\0';
+        }
+    }
     { char d[512]; snprintf(d, sizeof(d), "%s", cfg.state_path); char *sl = strrchr(d, '/'); if (sl) { *sl = 0; mkdir(d, 0755); }
       if (cfg.rawlog_dir) mkdir(cfg.rawlog_dir, 0755);
       snprintf(g_upfile, sizeof(g_upfile), "%s.upload.bin", cfg.state_path);

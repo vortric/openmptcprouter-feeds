@@ -28,7 +28,7 @@ _wan_devices() {
 }
 
 start_service() {
-	local enabled server udp_port http_base latency_ms udp_timeout_ms capacity_period_s down_bytes up_bytes capacity_max_s state_file rawlog_dir survey_base tunnel_interface
+	local enabled server udp_port http_base latency_ms udp_timeout_ms capacity_period_s down_bytes up_bytes capacity_max_s state_file rawlog_dir survey_base tunnel_interface tunnel_host
 	config_load omr-probe
 	config_get_bool enabled settings enabled 1
 	[ "$enabled" = "1" ] || return 0
@@ -55,8 +55,24 @@ start_service() {
 	# Guard on the WANs before adding the tunnel: a rig with no WAN has nothing
 	# to survey, and the tunnel alone would hide that.
 	[ -n "$IFACE_ARGS" ] || { logger -t omr-probe "no interfaces to probe"; return 0; }
-	# The tunnel goes last so the WAN round-robin order is unchanged.
-	_add_iface "$tunnel_interface"
+	# The tunnel needs its OWN target. The probe server's public address is
+	# pinned to a WAN by a host route so the VPN does not route through
+	# itself, so probing that address "via" the tunnel does not measure the
+	# tunnel: a UDP socket bound to the tunnel loses every reply (330/330 on
+	# the rig, because the answer returns on the WAN), and an HTTP transfer
+	# goes out over the WAN while its response comes back through the tunnel,
+	# which measures neither cleanly. The tunnel's far end runs the same
+	# server, so target that and both directions stay inside the tunnel.
+	if [ -n "$tunnel_interface" ]; then
+		config_get tunnel_host settings tunnel_host ''
+		[ -z "$tunnel_host" ] && tunnel_host=$(ip route show dev "$tunnel_interface" 2>/dev/null | awk '/^default/{print $3; exit}')
+		if [ -n "$tunnel_host" ]; then
+			# The tunnel goes last so the WAN round-robin order is unchanged.
+			_add_iface "${tunnel_interface}@${tunnel_host}"
+		else
+			logger -t omr-probe "tunnel $tunnel_interface has no gateway yet: not probing it (set omr-probe.settings.tunnel_host, or restart after the tunnel is up)"
+		fi
+	fi
 	[ -n "$rawlog_dir" ] && mkdir -p "$rawlog_dir"
 	survey_base=$(uci -q get omr-survey.settings.base_dir)
 

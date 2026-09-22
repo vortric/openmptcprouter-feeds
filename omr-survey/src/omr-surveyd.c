@@ -29,6 +29,13 @@
  * count, stop reason, both clocks). SIGTERM/SIGINT finish the current sample,
  * fsync and close the file, then exit 0. SIGHUP rotates survey.jsonl.
  *
+ * The router's syslog is captured alongside the samples: the ring buffer as
+ * it stands at start goes to <session>/syslog-start.log, and a `logread -f`
+ * child appends everything after that to <session>/syslog.log for the
+ * session's lifetime (killed on stop). Without it, diagnosing what the other
+ * daemons did during a drive depends on the ring buffer surviving, which it
+ * does not across a reboot.
+ *
  * Deliberately no libubus dependency: the ubus CLI already prints exactly
  * what this tool must archive, and shelling out keeps the sampler auditable.
  */
@@ -199,6 +206,50 @@ static int payload_ok(const char *p, size_t len)
     if (p[0] != '{' && p[0] != '[') return 0;
     if (memchr(p, '\n', len)) return 0;
     return 1;
+}
+
+/* ── syslog capture ─────────────────────────────────────────────────────── */
+
+static pid_t g_logpid = 0;
+
+static void start_log_capture(void)
+{
+    char path[700];
+    /* snapshot of the ring buffer as it stands now */
+    snprintf(path, sizeof(path), "%s/syslog-start.log", g_dir);
+    pid_t pid = fork();
+    if (pid == 0) {
+        int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd >= 0) { dup2(fd, STDOUT_FILENO); close(fd); }
+        int dn = open("/dev/null", O_WRONLY);
+        if (dn >= 0) { dup2(dn, STDERR_FILENO); close(dn); }
+        execlp("logread", "logread", (char *)NULL);
+        _exit(127);
+    }
+    if (pid > 0) { int st; while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {} }
+
+    /* follow everything from here on */
+    snprintf(path, sizeof(path), "%s/syslog.log", g_dir);
+    pid = fork();
+    if (pid < 0) return;
+    if (pid == 0) {
+        int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (fd >= 0) { dup2(fd, STDOUT_FILENO); close(fd); }
+        int dn = open("/dev/null", O_WRONLY);
+        if (dn >= 0) { dup2(dn, STDERR_FILENO); close(dn); }
+        execlp("logread", "logread", "-f", (char *)NULL);
+        _exit(127);
+    }
+    g_logpid = pid;
+}
+
+static void stop_log_capture(void)
+{
+    if (g_logpid <= 0) return;
+    kill(g_logpid, SIGTERM);
+    int st;
+    while (waitpid(g_logpid, &st, 0) < 0 && errno == EINTR) {}
+    g_logpid = 0;
 }
 
 static void open_jsonl(void)
@@ -433,6 +484,7 @@ int main(int argc, char **argv)
 
     g_start_real_ns = now_ns(CLOCK_REALTIME);
     g_start_mono_ns = now_ns(CLOCK_MONOTONIC);
+    start_log_capture();
     write_meta(NULL);
 
     const char *reason = "signal";
@@ -461,6 +513,7 @@ int main(int argc, char **argv)
         }
     }
 
+    stop_log_capture();
     write_meta(reason);
     close_jsonl();
     if (g_err) fclose(g_err);

@@ -51,6 +51,24 @@ check_once() {
 	reach=$(echo "$MQ" | jsonfilter -e '@.reachable' 2>/dev/null); npaths=$(echo "$MQ" | jsonfilter -e '@.paths.path_info[*].live' 2>/dev/null | grep -c true)
 	ep=$(echo "$MQ" | jsonfilter -e '@.status.clients[0].endpoint' 2>/dev/null); csec=$(echo "$MQ" | jsonfilter -e '@.status.clients[0].connected_sec' 2>/dev/null)
 	if [ "$reach" = "true" ] && [ -n "$ep" ]; then ok "tunnel" "connected to $ep for ${csec}s, live paths=$npaths"; else fail "tunnel" "reachable=${reach:-false} endpoint=${ep:-none}"; fi
+	# get_status must report the live path ids, not a frozen old set
+	sids=$(echo "$MQ" | jsonfilter -e '@.status.clients[0].paths[*].path_id' 2>/dev/null | tr '\n' ' ')
+	lids=$(echo "$MQ" | jsonfilter -e '@.paths.path_info[@.live=true].path_id' 2>/dev/null | tr '\n' ' ')
+	matched=0
+	for l in $lids; do for sd in $sids; do [ "$l" = "$sd" ] && matched=$((matched+1)); done; done
+	if [ -z "$lids" ]; then warn "per-path metrics" "no live path yet"
+	elif [ "$matched" = "0" ]; then fail "per-path metrics" "live paths [$lids] absent from get_status [$sids] -> srtt/bytes will be missing; restart mqvpn"
+	else ok "per-path metrics" "$matched live path(s) present in get_status"; fi
+	# tunnel probe (omr-probe with tunnel_interface set): the mqvpn load generator
+	tif=$(uci -q get omr-probe.settings.tunnel_interface)
+	if [ -n "$tif" ]; then
+		trtt=$(echo "$PROBE" | jsonfilter -e "@.interfaces['$tif'].udp.window.avg_ms" 2>/dev/null)
+		tsent=$(echo "$PROBE" | jsonfilter -e "@.interfaces['$tif'].udp.sent" 2>/dev/null)
+		tdown=$(echo "$PROBE" | jsonfilter -e "@.interfaces['$tif'].http_down.curl.speed_download" 2>/dev/null)
+		if [ -n "$tsent" ] && [ "${tsent:-0}" -gt 0 ]; then
+			ok "tunnel probe ($tif)" "rtt=${trtt}ms sent=${tsent}$([ -n "$tdown" ] && echo \", last down $((${tdown%.*}/125000)) Mbps\")"
+		else warn "tunnel probe ($tif)" "no probe yet (tunnel up? omr-probe restarted after tun0 appeared?)"; fi
+	fi
 
 	hdr "GNSS"
 	G=$(ubus -S call gnss status 2>/dev/null); GG=$(ubus -S call gnss get 2>/dev/null)
@@ -66,7 +84,9 @@ check_once() {
 		sid=$(echo "$SS" | jsonfilter -e '@.current.session'); n=$(echo "$SS" | jsonfilter -e '@.current.samples'); ge=$(echo "$SS" | jsonfilter -e '@.current.gnss_events')
 		pe=$(cat "$BASE/$sid/probe.jsonl" 2>/dev/null | wc -l | tr -d ' '); re=$(cat "$BASE/$sid/radio.jsonl" 2>/dev/null | wc -l | tr -d ' ')
 		last=$(tail -n1 "$BASE/$sid/survey.jsonl" 2>/dev/null); bad=$(echo "$last" | grep -o '"ok":false' | wc -l | tr -d ' ')
-		if [ "${bad:-0}" = "0" ]; then ok "session $sid" "samples=$n gnss=$ge probe=$pe radio=$re (last row: all sources ok)"; else warn "session $sid" "samples=$n gnss=$ge probe=$pe radio=$re (last row: $bad source(s) failed)"; fi
+		sl=$(cat "$BASE/$sid/syslog.log" 2>/dev/null | wc -l | tr -d ' ')
+		if [ "${bad:-0}" = "0" ]; then ok "session $sid" "samples=$n gnss=$ge probe=$pe radio=$re syslog=$sl (last row: all sources ok)"; else warn "session $sid" "samples=$n gnss=$ge probe=$pe radio=$re syslog=$sl (last row: $bad source(s) failed)"; fi
+		[ "${sl:-0}" = "0" ] && warn "syslog capture" "syslog.log is empty (logread -f child not running?)"
 	else warn "session" "none running  -> ubus call omr-survey start '{\"session\":\"NAME\"}'"; fi
 	free=$(df -m "$BASE" 2>/dev/null | awk 'NR==2{print $4}')
 	if [ "${free:-0}" -gt 2000 ]; then ok "disk $BASE" "${free} MB free"; else fail "disk $BASE" "${free:-?} MB free"; fi

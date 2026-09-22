@@ -66,6 +66,12 @@ happen off-router (`tools/survey_join.py`). `meta.json` is written at start
 and rewritten at stop (`stop_reason`: `signal`, `max_samples` or `duration`;
 sample count; both clocks).
 
+The router's syslog is captured with the session: `syslog-start.log` is the
+ring buffer as it stood at start, `syslog.log` everything logged while the
+session ran (a `logread -f` child, stopped with the session). Without it,
+explaining what the other daemons did during a drive depends on the ring
+buffer surviving, which it does not across a reboot.
+
 ## Control
 
 ```sh

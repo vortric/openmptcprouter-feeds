@@ -179,6 +179,11 @@ static void peer_on_connected(peer_t *p, uint64_t mono)
     getsockopt(p->fd, SOL_SOCKET, SO_ERROR, &err, &el);
     if (err) { peer_close(p, mono, "connect failed"); return; }
     p->st = ST_CONNECTED; p->connected_since_mono = mono; p->backoff_ns = 2000000000ull; p->len = 0;
+    /* Start the silence timer at THIS connection: last_mono still holds the
+     * previous connection's last line, which made the idle check fire
+     * immediately on every reconnect (527 connect/disconnect cycles on one
+     * carrier during the 2026-09-20 drive). */
+    p->last_mono = 0;
     char l[128]; snprintf(l, sizeof(l), "{\"event\":\"connected\"}");
     emit(p, l, now_ns(CLOCK_REALTIME), mono);
 }

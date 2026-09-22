@@ -7,6 +7,11 @@ config settings 'settings'
 	# Interfaces to probe. Empty = every network.wanN device whose
 	# multipath is master/on/backup.
 	list interface ''
+	# Also probe through the mqvpn tunnel. This measures what the bonded
+	# tunnel actually delivers (RTT 1 Hz + capacity per period, same as a
+	# carrier) and is the only thing that puts real traffic on mqvpn's
+	# paths, without which its per-path metrics stay idle. Empty = off.
+	option tunnel_interface 'tun0'
 	# UDP echo cadence / timeout (per interface).
 	option latency_ms '1000'
 	option udp_timeout_ms '2000'

@@ -30,6 +30,13 @@ a 60-sample RTT window with min/avg/max/jitter, last down/up curl results);
 omr-survey samples it as the `probe` source. `ubus call probe status` is the
 one-line summary.
 
+`tunnel_interface` (default `tun0`) adds the mqvpn tunnel as a fourth probe
+target. It measures what the bonded tunnel actually delivers, directly
+comparable with the per-carrier numbers, and it is the only thing that puts
+real traffic on mqvpn's paths: without it a survey drive leaves the tunnel
+idle and its per-path metrics say nothing. Budget it as a fourth carrier;
+its traffic also rides on the three WANs.
+
 Data budget: with the defaults (5 MB down + 2 MB up per interface every
 120 s, 3 carriers) the capacity probes use about 630 MB/h of mobile data;
 the UDP probes are negligible. Tune `capacity_period_s` / `down_bytes` /
